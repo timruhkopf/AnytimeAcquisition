@@ -1,2 +1,48 @@
 # AnytimeAcquisition
 Train a PFN to become an acquisition function trained to optimize anytime performance (and regret).
+
+
+
+# TODOs.
+* Set up a fork of ifbo. 
+* include it via [git submodules](https://git-scm.com/book/en/v2/Git-Tools-Submodules)
+* Check how we can account for the final regret as a secondary objective (or normalize); this should make the transformer also reason about what is possible performance-wise.
+i.e. similar to the $\alpha$-PFN, we can attempt to calculate the ground truth loss -- or do a proxy over it by all of the seen samples and use that as a normalization on the auc somehow. (i.e. the fixed lower bound cost that we will need to inquire)
+
+## (A) Synthetically prove that with this, we can generate some AUC optimizer.
+To avoid all of the moving parts and just show that conceptually this could work, we can make the following POC: 
+
+1. Take a tiny scaled transformer and adjust its input and output projections to accept three inputs and predict two outputs
+2. Have a 3-dimensional function, where we have (x, fidelity, y), and we want to optimize the AUC of (fidelity, y) given the hidden x dimension. 
+3. Calculate the AUC and sample locally and globally point,s and do the MSE style target-pull on all sequence elements. 
+4. Train until convergence and plot the final trajectory the transformer chose.
+
+## (B) Synthetic Learning curve extension
+We can extend this to the "learning curve case" if we also require that in order to collect an unseen x, you will have to pay for it with the amount of fidelity that you would need to collect to arrive at the queried point.
+
+## Architecture: 
+1. Dirichlet BNN prior.
+2. Frozen first half of the ifbo checkpoint (at best, Lora finetuning allowed). This is our pretrained feature extractor.
+3. Make the architecture causal. (which it conceptually was trained to anyway) --> Verify that the change is minimal. How does it affect the predictions of the trained model?
+4. Have a residual connection from the input to the second half of the architecture to obtain complete information.
+5. Change the output layer to predict an HPs + fidelity dimensional output.
+6. Calculate the AUC based on the difference from the best ACC.
+7. sample locally and globally and out of basket around the points from the dirichlet example (causally) (including fidelity dim) evaluate the y values in the prior and calulate the updated AUC.
+8. Now that we have the AUC for each alternative rollout, we can use MSE to pull the HP output from a position towards the best alternative given the context.
+
+Advantages: 
++ The AUC reflects both the fidelity spent and the cost associated with it, as well as the performance gain.
++ We exploit a strong feature extractor for learning curve projection
++ We basically have some Monte Carlo rollouts
++ We can differentiate through the otherwise nondifferentiable AUC
++ This is a single forward acquisition function purely prior trained
+
+
+## Generative approach to diverge from the prior
+Since the random policy implied by the sequentially read Dirichlet prior will ultimately be limited in its ability to provide good solutions, 
+We should aim to diverge from this "collecting" policy and instead take a recent checkpoint of the model and use it as a generative policy -- 
+We can do this because ultimately it is bound by the truth contained in the prior, and we have access to it. 
+Given that we fill a replay buffer with those sequences generated according to the local/global/basket sampled optimization, we can optimize over them with known targets.
+To boost the capability, we can take any previously generated sequence and given the prior seed that instantiated the BNN simply still have access to the ground truth -- but now actually make 
+actual rollouts at certain inception points of the sequence; i.e. if we had conditioned on parts of the sequence, we can determine a set of points (stick breaking?) where we want to produce rollouts and optimize. 
+Given these new experiences, we can train the model again. (Same process with task alteration, or parallel process with checkpoint & buffer communication)
