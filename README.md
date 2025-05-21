@@ -28,7 +28,7 @@ f = 3*(1-x)^2*exp(-(x^2)-(y+1)^2)...
    - 1/3*exp(-(x+1)^2 - y^2)
 -->
 
-we can of course also penalize for the shortest route in x dimension.
+The integral can be approximated with intermediate points to avoid skipping hills. Also the AUC should implicitly penalize the overall distance, because the longer we walk, the more we need to integrate.
 
 
 ## Architecture: 
