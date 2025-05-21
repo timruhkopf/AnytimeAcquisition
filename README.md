@@ -28,6 +28,8 @@ f = 3*(1-x)^2*exp(-(x^2)-(y+1)^2)...
    - 1/3*exp(-(x+1)^2 - y^2)
 -->
 
+we can of course also penalize for the shortest route in x dimension.
+
 
 ## Architecture: 
 1. Dirichlet BNN prior.
