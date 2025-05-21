@@ -9,7 +9,7 @@ Train a PFN to become an acquisition function trained to optimize anytime perfor
 * Check how we can account for the final regret as a secondary objective (or normalize); this should make the transformer also reason about what is possible performance-wise.
 i.e. similar to the $\alpha$-PFN, we can attempt to calculate the ground truth loss -- or do a proxy over it by all of the seen samples and use that as a normalization on the auc somehow. (i.e. the fixed lower bound cost that we will need to inquire)
 
-## (A) Synthetically prove that with this, we can generate some AUC optimizer.
+## Synthetically prove that with this, we can generate some AUC optimizer.
 To avoid all of the moving parts and just show that conceptually this could work, we can make the following POC: 
 
 1. Take a tiny scaled transformer and adjust its input and output projections to accept three inputs and predict two outputs
@@ -17,8 +17,17 @@ To avoid all of the moving parts and just show that conceptually this could work
 3. Calculate the AUC and sample locally and globally point,s and do the MSE style target-pull on all sequence elements. 
 4. Train until convergence and plot the final trajectory the transformer chose.
 
-## (B) Synthetic Learning curve extension
-We can extend this to the "learning curve case" if we also require that in order to collect an unseen x, you will have to pay for it with the amount of fidelity that you would need to collect to arrive at the queried point.
+The idea is that for the auc, we calculate the contours between any two points that the transformer chooses (sequentially) and the integral of the slices of the function in between them, to make it actually stay confined to the surface. 
+If we have a fixed start point and end point on a fixed problem, then the transformer will learn to become the **laziest climber** and, during its overfitting to the surface, learn an ideal climbing trajectory.
+This basically is a Search problem.
+
+Consider  [BBOB functions ](https://hub.optuna.org/benchmarks/bbob/) or some random shapes from [mathworks](https://ch.mathworks.com/help/symbolic/fsurf.html) 
+<!---
+f = 3*(1-x)^2*exp(-(x^2)-(y+1)^2)... 
+   - 10*(x/5 - x^3 - y^5)*exp(-x^2-y^2)... 
+   - 1/3*exp(-(x+1)^2 - y^2)
+-->
+
 
 ## Architecture: 
 1. Dirichlet BNN prior.
