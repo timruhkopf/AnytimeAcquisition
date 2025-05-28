@@ -30,6 +30,12 @@ f = 3*(1-x)^2*exp(-(x^2)-(y+1)^2)...
 
 The integral can be approximated with intermediate points to avoid skipping hills. Also the AUC should implicitly penalize the overall distance, because the longer we walk, the more we need to integrate.
 
+Maybe we can simplify the problem further by simply collecting random sequences and having the transformer converge within the $\epsilon$ ball of possible alterations. Here we can also sample extensively and find the best posssible solution  within the set of trajectories and check it against what the transformer came up with in terms of auc. Also, check against the reference AUC value of the original sequence. 
+Fixing the set of trajectories in the dataloader will avoid the generative process altogether and simplify the problem even further. 
+
+
+We can extend the synthetic case by trying out the same task with different initializations and by having a parametrized family of problems. (e.g., some scaling factors for sine/cosine functions and see how the transformer performs within seen or on unseen parameter ranges. This way, we can evaluate the generalization in prior!
+
 
 ## Architecture: 
 1. Dirichlet BNN prior.
@@ -49,7 +55,7 @@ Advantages:
 + This is a single forward acquisition function purely prior trained
 
 
-## Generative approach to diverge from the prior
+## Generative approach to diverge from the prior's limitations.
 Since the random policy implied by the sequentially read Dirichlet prior will ultimately be limited in its ability to provide good solutions, 
 We should aim to diverge from this "collecting" policy and instead take a recent checkpoint of the model and use it as a generative policy -- 
 We can do this because ultimately it is bound by the truth contained in the prior, and we have access to it. 
@@ -57,3 +63,16 @@ Given that we fill a replay buffer with those sequences generated according to t
 To boost the capability, we can take any previously generated sequence and given the prior seed that instantiated the BNN simply still have access to the ground truth -- but now actually make 
 actual rollouts at certain inception points of the sequence; i.e. if we had conditioned on parts of the sequence, we can determine a set of points (stick breaking?) where we want to produce rollouts and optimize. 
 Given these new experiences, we can train the model again. (Same process with task alteration, or parallel process with checkpoint & buffer communication)
+
+
+## Technical details. 
++ Huggingface Transformer implementation with
++ custom beam search and
++ key value caching.
++ Maybe accessing the attention weights on the full sequence.
+
+## Sorting out kinks: 
+Key theoretical aspects
++ how we evaluate the advantage of a single token**, once we have permuted the sequence. 
++ How do we want to permute: RND / attention weight RND / RND with rejection sampling based on AUC? / beam search? 
+
