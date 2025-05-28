@@ -35,6 +35,7 @@ Fixing the set of trajectories in the dataloader will avoid the generative proce
 
 
 We can extend the synthetic case by trying out the same task with different initializations and by having a parametrized family of problems. (e.g., some scaling factors for sine/cosine functions and see how the transformer performs within seen or on unseen parameter ranges. This way, we can evaluate the generalization in prior!
+What about noise?
 
 
 ## Architecture: 
