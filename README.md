@@ -2,6 +2,9 @@
 Train a PFN to become an acquisition function trained to optimize anytime performance (and regret).
 
 
+## Keywords (AAAI) 
+SO: Learning to Search
+% ML: Auto ML and Hyperparameter Tuning
 
 # TODOs.
 * Set up a fork of ifbo. 
