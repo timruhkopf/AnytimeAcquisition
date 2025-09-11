@@ -1,23 +1,27 @@
 import torch
 import math
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.loss.auc import AUCRegretLoss
 
 
-class SinEnvTorch:
-    def __init__(self, a=1.0, b=3, phi=0.0, m=0.0, theta=0.0, seed=None, device='cpu'):
+class SinEnv:
+    def __init__(self, a1=0.9, b1=2, phi1=0.0, a2=0.3, b2=1, phi2=0.7, m=-0.6, theta=0.3,
+                 seed=None, device='cpu', logger=None):
         """
         Sinusoidal + linear trend + rotation in 2D with PyTorch tensors.
         Domain normalized to [0,1] x [0,1].
 
-        f(x, y) = a * sin(b * 2π * x' + phi) + m * x' (with rotation)
+        f(x, y) = a1 * sin(b1 * 2π * x' + phi1) + a2 * sin(b2 * 2π * y' + phi2)
+                  + m * ((x' + y')/2)
         x', y' = rotated coordinates
 
-        :param a: Amplitude of the sine wave.
-        :param b: Frequency of the sine wave.
-        :param phi: Phase shift of the sine wave.
+        :param a1: Amplitude of the sine wave for the first component.
+        :param b1: Frequency of the sine wave for the first component.
+        :param phi1: Phase shift of the sine wave for the first component.
+        :param a2: Amplitude of the sine wave for the second component.
         :param m: Slope of the linear trend.
         :param theta: Rotation angle in radians.
         :param seed: Random seed for reproducibility.
@@ -26,11 +30,24 @@ class SinEnvTorch:
         if seed is not None:
             torch.manual_seed(seed)
         self.device = device
-        self.a = torch.tensor(a, device=device)
-        self.b = torch.tensor(b, device=device)
-        self.phi = torch.tensor(phi, device=device)
+        self.a1 = torch.tensor(a1, device=device)
+        self.a2 = torch.tensor(a2, device=device)
+        self.b1 = torch.tensor(b1, device=device)
+        self.b2 = torch.tensor(b2, device=device)
+        self.phi1 = torch.tensor(phi1, device=device)
+        self.phi2 = torch.tensor(phi2, device=device)
         self.m = torch.tensor(m, device=device)
         self.theta = torch.tensor(theta, device=device)
+
+        self.min, self.max = self.get_bounds()
+
+    def get_bounds(self):
+
+        # determine min and max on a grid for normalization
+        X, Y, Z = self.grid(n=1000)
+
+        return Z.min().item(), Z.max().item()
+
 
     def resample(self, a_range=(0.5, 2.0), b_range=(1, 10), phi_range=(0, 2*math.pi),
                  m_range=(-1, 1), theta_range=(0, 2*math.pi)):
@@ -41,85 +58,62 @@ class SinEnvTorch:
         self.m = (m_range[1] - m_range[0]) * torch.rand(1, device=self.device) + m_range[0]
         self.theta = (theta_range[1] - theta_range[0]) * torch.rand(1, device=self.device) + theta_range[0]
 
+        self.min, self.max = self.get_bounds()
+
     def rotate(self, x, y):
         # x, y: tensors of same shape
         x_r = torch.cos(self.theta) * x + torch.sin(self.theta) * y
         y_r = -torch.sin(self.theta) * x + torch.cos(self.theta) * y
         return x_r, y_r
 
-    def evaluate(self, x, y):
+    def _evaluate(self, X):
         """
         Evaluate the function at (x, y). x,y should be tensors or convertible to tensors.
         Values should be in [0,1].
         """
+
+        x, y = X[..., 0], X[..., 1]
         x = x.to(self.device) if isinstance(x, torch.Tensor) else torch.tensor(x, device=self.device)
         y = y.to(self.device) if isinstance(y, torch.Tensor) else torch.tensor(y, device=self.device)
         x_r, y_r = self.rotate(x, y)
-        val = self.a * torch.sin(self.b * 2 * math.pi * x_r + self.phi) + self.m * x_r
+        val = (self.a1 * torch.sin(self.b1 * 2 * math.pi * x_r + self.phi1)
+               + self.a2 * torch.sin(self.b2 * 2 * math.pi * y_r + self.phi2)
+               + self.m * ((x_r + y_r) / 2.0))
+
         return val
 
-    def normalized(self, xs, ys):
-        vals = self.evaluate(xs, ys)
-        vmin = vals.min()
-        vmax = vals.max()
-        return (vals - vmin) / (vmax - vmin + 1e-9)
+    def evaluate(self, X):
+        val = self._evaluate(X)
 
-    # def plot3d(self, resolution=200, trace=None, plot_points_only=False, auc=False):
-    #     # Create grid tensors
-    #     X = torch.linspace(0, 1, resolution, device=self.device)
-    #     Y = torch.linspace(0, 1, resolution, device=self.device)
-    #     XX, YY = torch.meshgrid(X, Y, indexing='xy')
-    #     ZZ = self.normalized(XX, YY)
-    #
-    #     # Convert to numpy arrays for Plotly
-    #     XX_np = XX.cpu().numpy()
-    #     YY_np = YY.cpu().numpy()
-    #     ZZ_np = ZZ.cpu().numpy()
-    #
-    #     # Create surface plot
-    #     surface = go.Surface(z=ZZ_np, x=XX_np, y=YY_np, colorscale='Viridis', opacity=0.85)
-    #
-    #     data = [surface]
-    #
-    #     # Add trace if given
-    #     if trace is not None:
-    #         X_trace, Y_trace = trace
-    #         # Convert trace to tensor for normalized evaluation
-    #         Z_trace = self.normalized(torch.tensor(X_trace, device=self.device),
-    #                                   torch.tensor(Y_trace, device=self.device)).cpu().numpy()
-    #         if plot_points_only:
-    #             trace_points = go.Scatter3d(
-    #                 x=X_trace, y=Y_trace, z=Z_trace,
-    #                 mode='markers',
-    #                 marker=dict(size=5, color='red')
-    #             )
-    #             data.append(trace_points)
-    #         else:
-    #             trace_line = go.Scatter3d(
-    #                 x=X_trace, y=Y_trace, z=Z_trace,
-    #                 mode='lines+markers',
-    #                 line=dict(color='red', width=4),
-    #                 marker=dict(size=3, color='red')
-    #             )
-    #             data.append(trace_line)
-    #
-    #     fig = go.Figure(data=data)
-    #     fig.update_layout(
-    #         title="Interactive 2D Sinusoidal Environment",
-    #         scene=dict(
-    #             xaxis_title='x',
-    #             yaxis_title='y',
-    #             zaxis_title='f(x, y)'
-    #         ),
-    #         width=800,
-    #         height=600
-    #     )
-    #
-    #     fig.show()
+        # normalize & clamp to [0,1]
+        val = (val - self.min) / (self.max - self.min + 1e-9)
+        val = val.clamp(0, 1)
+        return val
 
+    def grid(self, n=201):
+        xs = np.linspace(0, 1, n)
+        ys = np.linspace(0, 1, n)
+        X, Y = np.meshgrid(xs, ys)
+        X, Y = torch.tensor(X, device=self.device), torch.tensor(Y, device=self.device)
+        Z = self._evaluate(torch.stack([X, Y], axis=-1)).cpu().numpy()
+        return X, Y, Z
 
+    def approx_global_min(self, n=401):
+        X, Y, Z = self.grid(n)
+        idx = Z.argmin()
+        i, j = np.unravel_index(idx, Z.shape)
+        return (X[i, j], Y[i, j], Z[i, j])
 
-    def plot3d(self, resolution=200, trace=None, plot_points_only=False, trajectories=None):
+    def sample_initial_condition(self, B=16):
+        """
+        Samples B random initial conditions (x,y,f(x,y)) uniformly in [0,1]^2.
+        """
+        X = torch.rand(B, 1, 3, device=self.device)
+
+        X[..., -1] = self.evaluate(X[..., :-1])
+        return X
+
+    def plot3d(self, resolution=200, traces=None, plot_points_only=False, trajectories=None):
         """
         Plots the environment surface and optionally trajectories with their AUC loss side by side.
 
@@ -133,16 +127,27 @@ class SinEnvTorch:
         X = torch.linspace(0, 1, resolution, device=self.device)
         Y = torch.linspace(0, 1, resolution, device=self.device)
         XX, YY = torch.meshgrid(X, Y, indexing='xy')
-        ZZ = self.normalized(XX, YY)
+
+        flat_in = torch.stack([XX.flatten(), YY.flatten()], dim=-1)
+        ZZ = self.evaluate(flat_in).reshape(XX.shape)
+        # # ZZ_raw = self.evaluate(XX, YY)
+        # vmin = ZZ_raw.min()
+        # vmax = ZZ_raw.max()
+        # ZZ = (ZZ_raw - vmin) / (vmax - vmin + 1e-9)
+
+        # Convert to numpy arrays for Plotly
+        # ZZ = self.normalized(XX, YY)
 
         # Numpy for plotting
         XX_np, YY_np, ZZ_np = XX.cpu().numpy(), YY.cpu().numpy(), ZZ.cpu().numpy()
 
         # Setup subplot figure: 1 row, 2 cols if trajectories given, else just 1 col
-        if trajectories is not None:
-            fig = make_subplots(rows=1, cols=2,
+        if traces is not None:
+            fig = make_subplots(
+                rows=1, cols=2,
                                 specs=[[{'type': 'surface'}, {'type': 'xy'}]],
-                                subplot_titles=("Environment Surface", "Trajectories AUC"))
+                subplot_titles=("Environment Surface", "Trajectories AUC")
+            )
         else:
             fig = make_subplots(rows=1, cols=1, specs=[[{'type': 'surface'}]])
 
@@ -151,28 +156,37 @@ class SinEnvTorch:
         fig.add_trace(surface, row=1, col=1)
 
         # Add trace path on surface if given
-        if trace is not None:
-            X_trace, Y_trace = trace
-            Z_trace = self.normalized(torch.tensor(X_trace, device=self.device),
-                                      torch.tensor(Y_trace, device=self.device)).cpu().numpy()
+        if traces is not None:
+            X_trace, Y_trace = traces[..., :2].numpy(), traces[..., -1].flatten().numpy()
+            Z_trace = self.evaluate(X_trace).numpy()
+            # Z_trace = ((Z_trace_raw - vmin) / (vmax - vmin + 1e-9)).cpu().numpy()
             if plot_points_only:
-                trace_points = go.Scatter3d(x=X_trace, y=Y_trace, z=Z_trace, mode='markers',
-                                            marker=dict(size=5, color='red'))
+                trace_points = go.Scatter3d(
+                    x=X_trace, y=Y_trace, z=Z_trace, mode='markers',
+                    marker=dict(size=5, color='red')
+                )
                 fig.add_trace(trace_points, row=1, col=1)
             else:
-                trace_line = go.Scatter3d(x=X_trace, y=Y_trace, z=Z_trace, mode='lines+markers',
-                                          line=dict(color='red', width=4),
-                                          marker=dict(size=3, color='red'))
-                fig.add_trace(trace_line, row=1, col=1)
+                colors = np.linspace(0, 1, X_trace.shape[0])
+
+                for b in range(X_trace.shape[0]):
+                    trace_line = go.Scatter3d(
+                        x=X_trace[b, :, 0], y=X_trace[b, :, 1], z=Z_trace[b],
+                        mode='lines+markers',
+                        line=dict(color=colors[b], width=2),
+                        marker=dict(color=colors[b], size=2)
+                    )
+                    fig.add_trace(trace_line, row=1, col=1)
 
         # If trajectories provided, create AUC plot on right
-        if trajectories is not None:
+        if traces is not None:
             auc_loss = AUCRegretLoss()
-            auc_fig = auc_loss.plotly_plot(trajectories)
+            y = self.evaluate(traces[..., :2])
+            auc_loss.plotly_plot(y, fig=fig, row=1, col=2)
 
             # Add all traces from auc_fig to subplot col 2
-            for trace_obj in auc_fig.data:
-                fig.add_trace(trace_obj, row=1, col=2)
+            # for trace_obj in auc_fig.data:
+            #     fig.add_trace(trace_obj, row=1, col=2)
 
             # Update right subplot layout
             fig.update_xaxes(title_text="Timestep", row=1, col=2)
@@ -190,13 +204,15 @@ class SinEnvTorch:
 
 
 if __name__ == '__main__':
-
-    env = SinEnvTorch(seed=42, device='cpu')
+    env = SinEnv(seed=42, device='cpu')
     env.resample()
+
+    print("Approx global min (grid):", env.approx_global_min())
+
     env.plot3d(trace=(
         [0.1, 0.3, 0.5, 0.7, 0.9],  # example trace x
-        [0.2, 0.4, 0.6, 0.8, 1.0]   # example trace y
+        [0.2, 0.4, 0.6, 0.8, 1.0]  # example trace y
     ), trajectories=torch.tensor([
-        [0.5, 0.4, 0.6, 0.3, 0.2, 0.25],
+        [0.5, 0.4, 0.6, 0.3, 0.1, 0.25],
         [0.6, 0.5, 0.55, 0.4, 0.35, 0.3]
-    ]))
+    ]), plot_points_only=True)

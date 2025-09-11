@@ -1,0 +1,14 @@
+defaults:
+  - environment: sinenv
+  - model: tiny_causal
+  - trainer: default
+  - _self_
+
+
+num_epochs: 10
+seed: 0
+
+# change dir
+hydra:
+  job:
+    chdir: True

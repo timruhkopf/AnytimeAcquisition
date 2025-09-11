@@ -1,0 +1,5 @@
+defaults:
+  - loss@loss_fn: aucregret
+  - optimizer@optimizer: adamw
+
+_target_: src.trainer.default_trainer.DefaultTrainer
