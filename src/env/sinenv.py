@@ -209,10 +209,5 @@ if __name__ == '__main__':
 
     print("Approx global min (grid):", env.approx_global_min())
 
-    env.plot3d(trace=(
-        [0.1, 0.3, 0.5, 0.7, 0.9],  # example trace x
-        [0.2, 0.4, 0.6, 0.8, 1.0]  # example trace y
-    ), trajectories=torch.tensor([
-        [0.5, 0.4, 0.6, 0.3, 0.1, 0.25],
-        [0.6, 0.5, 0.55, 0.4, 0.35, 0.3]
-    ]), plot_points_only=True)
+    env.plot3d(traces=torch.rand(3, 10, 3))
+
