@@ -45,7 +45,8 @@ class DefaultTrainer:
                     self.env, B=B, T=T,
                     initial_condition=initial_condition
                 )
-                X = torch.cat([X, exploration_X], dim=0)
+                X = torch.cat([X, exploration_X], dim=0).to(self.device)
+
 
             b = X.shape[0]
 
@@ -63,7 +64,7 @@ class DefaultTrainer:
 
                 y = self.env.evaluate(pred)
 
-                loss = self.loss_fn(y)
+                loss = self.loss_fn(pred, y)
                 self.last_loss = loss.item()
                 if self.logger is not None:
                     self.logger.log({'epoch': epoch, 'batch': batch_idx, 'loss': self.last_loss})
