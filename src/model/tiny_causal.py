@@ -79,12 +79,13 @@ class TinyCausalTransformer(nn.Module):
         :return:
         """
         # FIXME! at some point we will want to trancend the rnd sequences:
+        # if step % 2 == 0:
         if False:
             # avoid representational collapse from initial clustering in the center
             # based on gpt and linear initialization on 0.5
-            initial_condition = self.env.sample_initial_condition(B=B)
-            X = self.model.generate(
-                self.env, B=B, T=T,
+            initial_condition = env.sample_initial_condition(B=B)
+            X = self.generate(
+                env, B=B, T=T,
                 initial_condition=initial_condition
             )
         else:
