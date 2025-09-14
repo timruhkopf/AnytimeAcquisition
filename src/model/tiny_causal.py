@@ -4,7 +4,7 @@ from transformers import GPT2Config, GPT2Model
 
 
 class TinyCausalTransformer(nn.Module):
-    def __init__(self, d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=1, logger=None):
+    def __init__(self, d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=2, logger=None):
         super().__init__()
         self.d_in = d_in
         # Project input up to model dim
@@ -26,47 +26,50 @@ class TinyCausalTransformer(nn.Module):
             nn.Linear(d_model, d_model),
             nn.ReLU(),
             nn.Linear(d_model, d_in),
+            nn.Sigmoid()
         )
-        self.sigmoid = nn.Sigmoid()
 
     @property
     def device(self):
         return next(self.parameters()).device
 
-    def forward(self, x, past_key_values=None):
+    def forward(self, x, past_key_values=None, use_cache=False):
         """
         x: (B, S, d_in)
         """
         h = self.in_proj(x)  # (B, S, d_model)
         outputs = self.transformer(
-            inputs_embeds=h, past_key_values=past_key_values, use_cache=True
+            inputs_embeds=h, past_key_values=past_key_values, use_cache=use_cache
         )
         hidden = outputs.last_hidden_state  # (B, S, d_model)
-        out = self.sigmoid(self.out_proj(hidden))
+        out = self.out_proj(hidden)
         return out, outputs.past_key_values
 
     @torch.no_grad()
     def generate(self, env, initial_condition, B=16, T=24):
+        self.eval()
         start_T = initial_condition.shape[1]
         X = torch.zeros(B, start_T + T, self.d_in, device=self.device)
 
         X[:, :start_T, :] = initial_condition
 
         past = None
-        for t in range(1, T):
+        for t in range(0, T):
             if t == 0:
-                inp = X[:, :start_T, :]
+                inp = X[:, :start_T, :]  # all initial tokens
             else:
-                inp = X[:, start_T + t - 1: start_T + t, :]  # only last token
+                # only ever feed the last token seed so far + past
+                inp = X[:, start_T + t - 1:start_T + t, :]
 
-            out, past = self.forward(inp, past_key_values=past)
+            out, past = self.forward(inp, past_key_values=past, use_cache=True)
             next_step = out[:, -1, :]
-            X[:, start_T + t, :-1] = next_step[:, :-1]
-            X[:, start_T + t, -1] = env.evaluate(next_step[:, :-1])
+            X[:, start_T + t, :-1] = next_step[:, :-1]  # only coordinates
+            X[:, start_T + t, -1] = env.evaluate(next_step[:, :-1])  # ground truth y value
+        self.train()
         return X
 
     @torch.no_grad()
-    def explore(self, env, initial_condition, B=16, T=24):
+    def explore(self, step, env, B=16, T=24):
         """
         Random, but y sorted trajectory
         :param env:
@@ -75,21 +78,31 @@ class TinyCausalTransformer(nn.Module):
         :param T:
         :return:
         """
-        # FIXME: these trajectories are still hard to learn from: they jump a lot between the
-        #  valleys. Maybe do local gradient descent steps from random points instead?
-        #  This would require that the env is differentiable.
-        X = torch.rand(B, T, self.d_in, device=self.device)
-        X[..., -1] = env.evaluate(X[..., :-1])
+        # FIXME! at some point we will want to trancend the rnd sequences:
+        if False:
+            # avoid representational collapse from initial clustering in the center
+            # based on gpt and linear initialization on 0.5
+            initial_condition = self.env.sample_initial_condition(B=B)
+            X = self.model.generate(
+                self.env, B=B, T=T,
+                initial_condition=initial_condition
+            )
+        else:
 
-        sorted_indices = torch.argsort(X[..., -1], dim=1, descending=True)
+            # FIXME: these trajectories are still hard to learn from: they jump a lot between the
+            #  valleys. Maybe do local gradient descent steps from random points instead?
+            #  This would require that the env is differentiable.
+            X = torch.rand(B, T, self.d_in, device=self.device)
+            X[..., -1] = env.evaluate(X[..., :-1])
 
-        # Gather sorted tensor along T dimension using sorted indices
-        sorted_rest = torch.gather(
-            X[..., :], 1,
-            sorted_indices.unsqueeze(-1).expand(-1, -1, X.size(-1))
-        )
+            sorted_indices = torch.argsort(X[..., -1], dim=1, descending=True)
 
-        X = torch.cat([initial_condition, sorted_rest], dim=1)
+            # Gather sorted tensor along T dimension using sorted indices
+            X = torch.gather(
+                X[..., :], 1,
+                sorted_indices.unsqueeze(-1).expand(-1, -1, X.size(-1))
+            )
+
 
         return X
 

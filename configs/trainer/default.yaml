@@ -1,5 +1,5 @@
 defaults:
-  - loss@loss_fn: auc_weighed_mse
+  - loss@loss_fn: seq #  auc_weighed_mse
   - optimizer@optimizer: adamw
 
 _target_: src.trainer.default_trainer.DefaultTrainer

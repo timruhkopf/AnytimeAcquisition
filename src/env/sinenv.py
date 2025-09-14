@@ -2,7 +2,9 @@ import torch
 import math
 import numpy as np
 import plotly.graph_objects as go
+from matplotlib import pyplot as plt
 from plotly.subplots import make_subplots
+from plotly.offline import plot
 
 from src.loss.auc import AUCRegretLoss
 
@@ -83,12 +85,12 @@ class SinEnv:
         return val
 
     def evaluate(self, X):
-        val = self._evaluate(X)
+        y = self._evaluate(X)
 
         # normalize & clamp to [0,1]
-        val = (val - self.min) / (self.max - self.min + 1e-9)
-        val = val.clamp(0, 1)
-        return val
+        y = (y - self.min) / (self.max - self.min + 1e-9)
+        y = y.clamp(0, 1)
+        return y
 
     def grid(self, n=201):
         xs = np.linspace(0, 1, n)
@@ -200,7 +202,9 @@ class SinEnv:
             height=600,
             template='plotly_white'
         )
-        fig.show()
+        # fig.show()
+        plot(fig)
+        plt.clf()
 
 
 if __name__ == '__main__':

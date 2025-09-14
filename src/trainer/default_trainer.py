@@ -1,9 +1,12 @@
 import torch
 from tqdm import tqdm
 
+from src.callbacks.plot_trajectories_callback import PlotTrajectoriesCallback
+
 
 class DefaultTrainer:
-    def __init__(self, model, optimizer, loss_fn, env, callbacks=None, device="cpu", logger=None,
+    def __init__(self, model, optimizer, loss_fn, env, callbacks=[PlotTrajectoriesCallback()],
+                 device="cpu", logger=None,
                  **kwargs):
         self.model = model.to(device)
         self.optimizer = optimizer(self.model.parameters())
@@ -21,10 +24,10 @@ class DefaultTrainer:
         for cb in self.callbacks:
             cb.set_trainer(self)
 
-    def train(self, num_epochs, B=16):
+    def train(self, num_epochs, B=32):
 
         B = self.kwargs.get('B', B)
-        T = self.kwargs.get('T', 24)
+        T = self.kwargs.get('T', 25)
 
         for cb in self.callbacks: cb.on_train_begin()
         for epoch in tqdm(range(num_epochs), desc="Training epochs"):
@@ -33,26 +36,15 @@ class DefaultTrainer:
 
             self.model.eval()
 
-            initial_condition = self.env.sample_initial_condition(B=B)
 
-            X = self.model.generate(
-                self.env, B=B, T=T,
-                initial_condition=initial_condition
+            X = self.model.explore(
+                step=epoch,
+                env=self.env, B=B, T=T,
             )
-
-            if hasattr(self.model, 'explore'):
-                exploration_X = self.model.explore(
-                    self.env, B=B, T=T,
-                    initial_condition=initial_condition
-                )
-                X = torch.cat([X, exploration_X], dim=0).to(self.device)
-
-
-            b = X.shape[0]
 
             self.train_loader = torch.utils.data.DataLoader(
                 torch.utils.data.TensorDataset(X),
-                batch_size=self.kwargs.get('batch_size', b ),
+                batch_size=B,
                 shuffle=True
             )
 
@@ -60,12 +52,12 @@ class DefaultTrainer:
             for batch_idx, X in enumerate(self.train_loader):
                 self.batch_idx = batch_idx
                 X = X[0].to(self.device)
-                pred, _ = self.model(X[:, :-1, :])
+                pred, _ = self.model(X)
 
-                y = self.env.evaluate(pred)
-
-                loss = self.loss_fn(pred, y)
+                y = self.env.evaluate(pred[..., :-1])
+                loss = self.loss_fn(pred, X, y)
                 self.last_loss = loss.item()
+
                 if self.logger is not None:
                     self.logger.log({'epoch': epoch, 'batch': batch_idx, 'loss': self.last_loss})
 

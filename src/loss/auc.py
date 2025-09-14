@@ -116,7 +116,7 @@ class AUCWeightedMSELoss(AUCRegretLoss):
                     y[b, starts[i]:ends[i]] = row[starts[i]]  # last segment stays as is
         return y
 
-    def linear_penalty(self, y, inc, cap=5):
+    def linear_penalty(self, y, inc_indices, cap=5):
         # PENALTY SCHEME:
         # define a penalty factor (always non-zero!). this penalty factor is a slack variable,
         #  that will allow us to explore unpenalized; specifically, we don't want to penalize
@@ -131,7 +131,7 @@ class AUCWeightedMSELoss(AUCRegretLoss):
         for b in range(B):
             count = 0
             for t in range(1, T):
-                if inc.indices[b, t] != inc.indices[b, t - 1]:
+                if inc_indices[b, t] != inc_indices[b, t - 1]:
                     count = 0
                 else:
                     count += 1
@@ -171,46 +171,45 @@ class AUCWeightedMSELoss(AUCRegretLoss):
         :return:
         """
         # compute the incumbent curve :
-        inc = torch.cummin(y, dim=1)
+        inc_values, inc_indices = torch.cummin(y, dim=1)
 
         # get the X sequence of incumbent values (shifted by one incumbent)
         # i.e. we want to pull the y values towards the next incumbent.
-        target_indices = self.shift_segments(inc.indices)
+        target_indices = self.shift_segments(inc_indices)
+
+        # FIXME: we will have zero loss for the last incumbent segment. can we maybe try local
+        #  sampling around it
 
         # collect the y_values of the shifted
         # fixme: we probably want to inversely penalize with the regret here:
         #  this means that incumbent changes with small difference in y should be penalized more,
         #  encouraging to collapse small incumbent changes
-        target_y = torch.gather(y, 1, target_indices)
-        regret = y - target_y
+        # regret = distance from best-so-far value
+        regret = (y - inc_values).clamp(min=0)  # (B, L)
 
-        # normalize regret to [0, 1]
-        regret_norm = regret / (regret.max(dim=1, keepdim=True).values + 1e-9)
+        # exploration mask = 1 if not incumbent, 0 if incumbent
+        exploration_mask = (inc_indices != torch.arange(
+            y.size(1), device=y.device
+        ).unsqueeze(0)).float()  # shape (B,L)
 
-        # invert regret: small regret -> large weight
-        inv_regret = 1.0 - regret_norm
+        # # normalize regret to [0, 1]
+        # regret_norm = regret / (regret.max(dim=1, keepdim=True).values + 1e-9)
+        #
+        # # invert regret: small regret -> large weight
+        # inv_regret = 1.0 - regret_norm
 
         # regret = regret / (regret.max(dim=1, keepdim=True).values + 1e-9)  # Normalize to [0,1]
 
         X = X[..., :-1]  # remove y values from input
-
-        # FIXME: validate that this is correct!
         target_X = torch.gather(X, 1, target_indices.unsqueeze(-1).expand(-1, -1, X.size(-1)))
 
         if self.soft_penalize_exploration:
-            penalty = self.linear_penalty(y, inc, cap=self.kwargs.get('penalty_cap', None))
+            penalty = self.linear_penalty(y, inc_indices, cap=self.kwargs.get('penalty_cap', None))
         else:
             penalty = 1.0
 
-        loss = (X - target_X) ** 2 * penalty # *  inv_regret
-        return loss.mean()
-
-
-
-
-
-
-
+        loss = ((target_X -X) ** 2).sum(-1)  # * penalty # *  inv_regret
+        return -loss.mean()
 
 if __name__ == '__main__':
     loss = AUCRegretLoss()
