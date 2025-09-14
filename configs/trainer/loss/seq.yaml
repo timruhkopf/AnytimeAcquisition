@@ -1,1 +1,1 @@
-_target_: src.loss.seq.MinimaSeekingSequenceReconstructionLoss
+_target_: src.loss.seq.IncumbentLoss
