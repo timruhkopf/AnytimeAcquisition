@@ -10,6 +10,7 @@ class PlotTrajectoriesCallback(AbstractCallback):
         if (self.epoch + 1) % self.plot_every_n_epochs == 0:
             n_traces = 10
 
+            # self.env.resample()
             initial_condition = self.trainer.env.sample_initial_condition(B=n_traces)
             X = self.trainer.model.generate(
                 self.trainer.env, B=n_traces, T=25,

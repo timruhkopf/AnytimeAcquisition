@@ -11,6 +11,7 @@ class AUCAlternativesLoss(nn.Module):
     def get_inc_mask(self, inc_values):
         device = inc_values.device
         # create a mask for the incumbent positions
+        B, A, T = inc_values.shape
         inc_mask = torch.cat([
             torch.ones(B, 1, 1, dtype=torch.bool, device=device),
             torch.diff(inc_values, dim=-1) < 0
@@ -23,6 +24,41 @@ class AUCAlternativesLoss(nn.Module):
         inc_mask = self.get_inc_mask(inc_values)
         exploration_mask = ~inc_mask
         return exploration_mask
+
+    def _calc_incumbent_auc(self, min_inc_values, min_inc_indices):
+        """
+        On the ideal trajectory, compute, what the AUC contributions of the incumbents are.
+        Notice, that we don't have the individual contributions of the predicted incumbents as
+        difference to this AUC
+        :param min_inc_values:
+        :param min_inc_indices:
+        :return:
+        """
+        B, A, T = min_inc_values.shape
+        # penalize only incumbent change positions to encourage exploration
+        inc_mask = self.get_inc_mask(min_inc_values)
+        inc_change_pos = min_inc_indices * inc_mask
+        inc_change_pos[..., 0] = 1
+        inc_B, inc_A, inc_T = torch.nonzero(inc_change_pos, as_tuple=True)
+        # fixme: when incumbent is very early during training, we want the model to recover
+        # so we add random positions with an auc step=1 respectively
+        # fixme: check whether prepeding is correct here
+        d = torch.diff(inc_T)
+        d = torch.cat([torch.tensor([1]), d], dim=0)
+        d[
+            d < 0] = 1  # we have negative distances on the next incumbent (first step) because the idx
+        # will be 0 again! Since it costs one token to acquire this, we assign 1
+
+        inc_distances = torch.zeros(B, A, T)
+        inc_distances[inc_B, inc_A, (inc_T)] = d.float()
+
+        diff_auc = (-1) * torch.diff(min_inc_values, dim=-1)
+        # prepend the initial condition cost (0-step generation)
+        diff_auc = torch.cat([min_inc_values[..., 0].unsqueeze(-1), diff_auc], dim=-1)
+        diff_auc *= inc_mask
+
+        return diff_auc
+
 
 
     def forward(self, predictions, predictions_y_true, alternatives, padding_mask=None):
@@ -62,17 +98,27 @@ class AUCAlternativesLoss(nn.Module):
                 predictions, predictions_y_true.unsqueeze(1), alternatives
             ))
 
+        diff_auc = self._calc_incumbent_auc(min_inc_values, min_inc_indices)
+
+        inc_mask = self.get_inc_mask(min_inc_values)
+
         if padding_mask is None:
             padding_mask = torch.ones((B, A, T), device=predictions.device)
 
         diff_x = predictions[..., :-1] - min_sequence[..., :-1]  # alternatives[..., :-1]
-        diff_x = diff_x * padding_mask.unsqueeze(-1).repeat(1, 1, 1, D - 1)  # (B,A,T,D-1)
+        diff_x= diff_x * padding_mask.unsqueeze(-1).repeat(1, 1, 1, D - 1)  # (B,A,T,D-1)
+        diff_x_inc = diff_x * inc_mask.unsqueeze(-1).repeat(1, 1, 1, D - 1)
 
-        diff_y = pred_inc_values * padding_mask - min_inc_values * padding_mask
+        # calculate the incumbent differences at the incumbent position, just as single step cost
+        # between incumbents.
+        # diff_y = (pred_inc_values * padding_mask * inc_mask - min_inc_values * padding_mask *
+        #           inc_mask)
+        # diff_auc = diff_y.sum(dim=-1)  # (B,A)
+        diff_x_inc = diff_x_inc.sum(dim=(-2, -1))
 
-        diff_auc = diff_y.sum(dim=-1)  # (B,A)
-        diff_x = diff_x.sum(dim=(-2, -1))
-        return (diff_auc * diff_x).mean()
+        # exploration penalty (one step = 1 token)
+        exploration_penalty = diff_x * (~inc_mask).unsqueeze(-1).repeat(1, 1, 1, D - 1)
+        return (diff_auc * diff_x_inc).mean() + exploration_penalty.mean()
 
 
 

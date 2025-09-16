@@ -40,7 +40,7 @@ class DefaultTrainer:
             X = self.model.explore(
                 step=epoch,
                 # FIXME: repeats should be a parameter
-                env=self.env, B=B*10, T=T,
+                env=self.env, B=B, T=T,
             )
 
             self.train_loader = torch.utils.data.DataLoader(
