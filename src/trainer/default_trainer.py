@@ -39,7 +39,8 @@ class DefaultTrainer:
 
             X = self.model.explore(
                 step=epoch,
-                env=self.env, B=B, T=T,
+                # FIXME: repeats should be a parameter
+                env=self.env, B=B*10, T=T,
             )
 
             self.train_loader = torch.utils.data.DataLoader(
@@ -49,13 +50,14 @@ class DefaultTrainer:
             )
 
             self.model.train()
+            # fixed environment evaluation allows to reiterate over the same trajectory
             for batch_idx, X in enumerate(self.train_loader):
                 self.batch_idx = batch_idx
                 X = X[0].to(self.device)
                 pred, _ = self.model(X)
 
                 y = self.env.evaluate(pred[..., :-1])
-                loss = self.loss_fn(pred, X, y)
+                loss = self.loss_fn(pred, y, alternatives=X)
                 self.last_loss = loss.item()
 
                 if self.logger is not None:
@@ -66,5 +68,9 @@ class DefaultTrainer:
                 self.optimizer.zero_grad()
 
                 for cb in self.callbacks: cb.on_batch_end()
+
+            # reset env
+            # self.env.resample()
+
             for cb in self.callbacks: cb.on_epoch_end()
         for cb in self.callbacks: cb.on_train_end()

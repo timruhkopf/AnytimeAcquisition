@@ -200,7 +200,9 @@ class SinEnv:
             scene=dict(xaxis_title='x', yaxis_title='y', zaxis_title='f(x, y)'),
             width=1200,
             height=600,
-            template='plotly_white'
+            template='plotly_white',
+            yaxis_range=[0, 1]
+
         )
         # fig.show()
         plot(fig)

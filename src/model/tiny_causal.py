@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 from transformers import GPT2Config, GPT2Model
 
+from src.loss.auc_alternatives import find_element_wise_optimal_trajectory
+
 
 class TinyCausalTransformer(nn.Module):
-    def __init__(self, d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=2, logger=None):
+    def __init__(self, d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=4, logger=None):
         super().__init__()
         self.d_in = d_in
         # Project input up to model dim
@@ -28,6 +30,9 @@ class TinyCausalTransformer(nn.Module):
             nn.Linear(d_model, d_in),
             nn.Sigmoid()
         )
+        # Todo make this configurable
+
+        self.exploration = 'rnd-sorted'  # 'rnd', 'rnd-sorted', 'generate', 'mixed'
 
     @property
     def device(self):
@@ -80,32 +85,50 @@ class TinyCausalTransformer(nn.Module):
         """
         # FIXME! at some point we will want to trancend the rnd sequences:
         # if step % 2 == 0:
-        if False:
-            # avoid representational collapse from initial clustering in the center
-            # based on gpt and linear initialization on 0.5
-            initial_condition = env.sample_initial_condition(B=B)
-            X = self.generate(
-                env, B=B, T=T,
-                initial_condition=initial_condition
-            )
-        else:
 
-            # FIXME: these trajectories are still hard to learn from: they jump a lot between the
-            #  valleys. Maybe do local gradient descent steps from random points instead?
-            #  This would require that the env is differentiable.
-            X = torch.rand(B, T, self.d_in, device=self.device)
-            X[..., -1] = env.evaluate(X[..., :-1])
+        # avoid representational collapse from initial clustering in the center
+        # based on gpt and linear initialization on 0.5
+        initial_condition = env.sample_initial_condition(B=B)
+        X = self.generate(
+            env, B=B, T=T-1,
+            initial_condition=initial_condition
+        ) # already has the correct env y value!
+        if self.exploration =='generate':
+            return X
 
-            sorted_indices = torch.argsort(X[..., -1], dim=1, descending=True)
+
+        # FIXME: these trajectories are still hard to learn from: they jump a lot between the
+        #  valleys. Maybe do local gradient descent steps from random points instead?
+        #  This would require that the env is differentiable.
+        X_rnd = torch.rand(B, T, self.d_in, device=self.device)
+        X_rnd[..., -1] = env.evaluate(X_rnd[..., :-1])
+
+        if self.exploration == 'rnd-sorted':
+            sorted_indices = torch.argsort(X_rnd[..., -1], dim=1, descending=True)
 
             # Gather sorted tensor along T dimension using sorted indices
-            X = torch.gather(
-                X[..., :], 1,
-                sorted_indices.unsqueeze(-1).expand(-1, -1, X.size(-1))
+            X_rnd = torch.gather(
+                X_rnd[..., :], 1,
+                sorted_indices.unsqueeze(-1).expand(-1, -1, X_rnd.size(-1))
             )
 
+        if self.exploration.startswith('rnd'):
+            return X_rnd
 
-        return X
+        # Augment the generated sequence with elementwise random better alternatives
+        A = 1
+
+        min_sequence, _, _ = find_element_wise_optimal_trajectory(
+            X.unsqueeze(1).repeat(1, A, 1, 1),
+            X[..., -1].unsqueeze(1).repeat(1, A, 1),
+            X_rnd.unsqueeze(1).repeat(1, A, 1, 1),
+
+        )
+        # fixme: use batch dim for alternatives instead!
+        if self.exploration == 'mixed':
+          return min_sequence.squeeze(1)
+
+        raise ValueError(f"Unknown exploration strategy {self.exploration}")
 
     @torch.no_grad()
     def act(self, X):

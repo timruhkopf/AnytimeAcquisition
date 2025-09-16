@@ -54,15 +54,15 @@ class AUCRegretLoss(torch.nn.Module):
                 opacity=0.5
             ), **kwargs)
             # Fill area between min_val and trajectory
-            fig.add_trace(go.Scatter(
-                x=x_vals + x_vals[::-1],
-                y=list(traj) + [min_val] * len(traj),
-                fill='toself',
-                fillcolor='rgba(255,0,0,0.2)',
-                line=dict(color='rgba(255,0,0,0)'),
-                showlegend=False,
-                hoverinfo='skip'
-            ), **kwargs)
+            # fig.add_trace(go.Scatter(
+            #     x=x_vals + x_vals[::-1],
+            #     y=list(traj) + [min_val] * len(traj),
+            #     fill='toself',
+            #     fillcolor='rgba(255,0,0,0.2)',
+            #     line=dict(color='rgba(255,0,0,0)'),
+            #     showlegend=False,
+            #     hoverinfo='skip'
+            # ), **kwargs)
 
         # Horizontal line for min_val
         fig.add_trace(go.Scatter(
@@ -79,7 +79,8 @@ class AUCRegretLoss(torch.nn.Module):
                 xaxis_title="Timestep",
                 yaxis_title="Value",
                 showlegend=True,
-                template='plotly_white'
+                template='plotly_white',
+            yaxis_range = [0, 1]
             )
             fig.show()
 
