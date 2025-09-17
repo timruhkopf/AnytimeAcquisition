@@ -1,1 +1,1 @@
-_target_: src.loss.auc_alternatives.AUCAlternativesLoss
+_target_: src.loss.auc_contrib.AUCContributionLoss

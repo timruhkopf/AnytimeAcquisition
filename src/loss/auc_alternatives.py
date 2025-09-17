@@ -45,20 +45,18 @@ class AUCAlternativesLoss(nn.Module):
         # fixme: check whether prepeding is correct here
         d = torch.diff(inc_T)
         d = torch.cat([torch.tensor([1]), d], dim=0)
-        d[
-            d < 0] = 1  # we have negative distances on the next incumbent (first step) because the idx
-        # will be 0 again! Since it costs one token to acquire this, we assign 1
+        d[d < 0] = 1  # we have negative distances on the next incumbent (first step)
+        # because the idx will be 0 again! Since it costs one token to acquire this, we assign 1
 
         inc_distances = torch.zeros(B, A, T)
-        inc_distances[inc_B, inc_A, (inc_T)] = d.float()
+        inc_distances[inc_B, inc_A, inc_T] = d.float()
 
         diff_auc = (-1) * torch.diff(min_inc_values, dim=-1)
         # prepend the initial condition cost (0-step generation)
         diff_auc = torch.cat([min_inc_values[..., 0].unsqueeze(-1), diff_auc], dim=-1)
         diff_auc *= inc_mask
 
-        return diff_auc
-
+        return diff_auc / min_inc_values.shape[-1]
 
 
     def forward(self, predictions, predictions_y_true, alternatives, padding_mask=None):
@@ -118,7 +116,7 @@ class AUCAlternativesLoss(nn.Module):
 
         # exploration penalty (one step = 1 token)
         exploration_penalty = diff_x * (~inc_mask).unsqueeze(-1).repeat(1, 1, 1, D - 1)
-        return (diff_auc * diff_x_inc).mean() + exploration_penalty.mean()
+        return (diff_auc * diff_x_inc).mean() #+ exploration_penalty.mean()
 
 
 
