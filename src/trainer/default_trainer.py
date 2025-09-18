@@ -1,8 +1,17 @@
+from functools import partial
+
 import torch
 from tqdm import tqdm
 
 from src.callbacks.plot_trajectories_callback import PlotTrajectoriesCallback
+import inspect
 
+
+def has_key_in_init(cls, key):
+    sig = inspect.signature(cls.__init__)
+    # Exclude 'self' and check if 'env' is present
+    params = [p for p in sig.parameters.values() if p.name != 'self']
+    return key in [p.name for p in params]
 
 class DefaultTrainer:
     def __init__(self, model, optimizer, loss_fn, env, callbacks=[PlotTrajectoriesCallback()],
@@ -11,6 +20,8 @@ class DefaultTrainer:
         self.model = model.to(device)
         self.optimizer = optimizer(self.model.parameters())
         self.loss_fn = loss_fn
+        if isinstance(loss_fn, partial) and has_key_in_init(loss_fn.func, 'env'):
+            self.loss_fn = self.loss_fn(env=env)
         self.env = env
 
         self.logger = logger
@@ -70,7 +81,7 @@ class DefaultTrainer:
                 for cb in self.callbacks: cb.on_batch_end()
 
             # reset env
-            # self.env.resample()
+            self.env.resample()
 
             for cb in self.callbacks: cb.on_epoch_end()
         for cb in self.callbacks: cb.on_train_end()

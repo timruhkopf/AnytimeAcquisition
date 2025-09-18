@@ -1,20 +1,54 @@
 import torch
 from torch import nn
-# from functools import lru_cache
+from functools import lru_cache
 
 from src.loss.auc_alternatives import find_element_wise_optimal_trajectory
 
 
+class ECDF(torch.nn.Module):
+    """
+    CC: https://discuss.pytorch.org/t/cumulative-distribution-function-of-a-tensor-cdf/64613/2
+    """
+
+    def __init__(self, x, side='right'):
+        super(ECDF, self).__init__()
+
+        if side.lower() not in ['right', 'left']:
+            msg = "side can take the values 'right' or 'left'"
+            raise ValueError(msg)
+        self.side = side
+
+        if len(x.shape) != 1:
+            msg = 'x must be 1-dimensional'
+            raise ValueError(msg)
+
+        x = x.sort()[0]
+        nobs = len(x)
+        y = torch.linspace(1. / nobs, 1, nobs, device=x.device)
+
+        self.x = torch.cat((torch.tensor([-torch.inf], device=x.device), x))
+        self.y = torch.cat((torch.tensor([0], device=y.device), y))
+        self.n = self.x.shape[0]
+
+    def forward(self, time):
+        tind = torch.searchsorted(self.x, time, side=self.side) - 1
+        return self.y[tind]
+
+
 class AUCContributionLoss(nn.Module):
 
-    # @lru_cache(maxsize=5)
-    # def get_causal_mask(self, B, A, T, device) -> torch.Tensor:
-    #     # Creates a lower-triangular matrix mask of shape (T, T)
-    #     # with True in permissible attention positions.
-    #     mask = torch.tril(torch.ones(T, T, dtype=torch.bool)).to(device)
-    #     # Expand to (B, 1, T, T) or (B, T, T) depending on usage
-    #     # Here just repeat mask for batch B
-    #     return mask.view(1,1,T,T).expand(B, A, T, T)
+    def __init__(self, env):
+        super().__init__()
+        self.env = env
+
+    @lru_cache(maxsize=5)
+    def get_causal_mask(self, B, T, device) -> torch.Tensor:
+        # Creates a lower-triangular matrix mask of shape (T, T)
+        # with True in permissible attention positions.
+        mask = torch.tril(torch.ones(T, T, dtype=torch.bool)).to(device)
+        # Expand to (B, 1, T, T) or (B, T, T) depending on usage
+        # Here just repeat mask for batch B
+        return mask.view(1, T, T).expand(B, T, T)
 
     def get_inc_mask(self, inc_values):
         device = inc_values.device
@@ -61,10 +95,11 @@ class AUCContributionLoss(nn.Module):
         pred_seq = (predictions, pred_inc_values, pred_inc.indices)
 
         auc, joint_mask = self.find_instantaneous_regret(target_seq, pred_seq)
+        # self.exploration_bonus(target_seq, pred_seq)
 
         # compute the coordinate differences
         # TODO: check sign!
-        coord_diff = predictions - min_sequence
+        coord_diff = torch.nn.functional.mse_loss(predictions, min_sequence, reduction='none')
         coord_diff *= joint_mask.unsqueeze(-1).repeat(1, 1, 1, D)
 
         # fixme, the exploration bonus is intended to avoid collapse, but it likely is ill posed,
@@ -74,6 +109,14 @@ class AUCContributionLoss(nn.Module):
         #  for every single step
         # exploration_bonus = self.get_exploration_bonus(joint_mask, min_sequence, predictions).mean()
         # self.get_exploration_loss(predictions, predictions_y_true)
+        exploration_failure = self.get_exploration_loss(
+            target_seq, pred_seq, predictions_y_true
+        )
+
+        return (
+                exploration_failure.unsqueeze(-1).repeat(1, 1, 1, D - 1) \
+                * coord_diff[..., :-1]
+        ).mean()
 
         # deselect the y value difference here and multiply with the contribution
         regret = (coord_diff[:, :, :T - 1, :-1] * auc.unsqueeze(-1).repeat(1, 1, 1, D - 1))
@@ -81,20 +124,66 @@ class AUCContributionLoss(nn.Module):
         # fixme: instead of mean on the regret components, take the weighted average based on
         #  the relative final regret
         final_regret = min_inc_values[..., -1].view(B, 1, 1, 1)
-
         return (regret * (final_regret / B)).sum()  # + exploration_bonus
 
-    def get_exploration_bonus(self, inc_mask, min_sequence, pred_sequence):
-        # TODO if we only have early incumbents, we may want to encourage denser signals, by
-        #  adding ones to exploration steps, despite the lack of an incumbent change. This
-        #  is just a safeguard against collapse when the exploration process is non-ideal
-        exploration_mask = ~inc_mask
-        _, _, T, D = pred_sequence.shape
+    # def get_exploration_bonus(self, inc_mask, min_sequence, pred_sequence):
+    #     # TODO if we only have early incumbents, we may want to encourage denser signals, by
+    #     #  adding ones to exploration steps, despite the lack of an incumbent change. This
+    #     #  is just a safeguard against collapse when the exploration process is non-ideal
+    #     exploration_mask = ~inc_mask
+    #     _, _, T, D = pred_sequence.shape
+    #
+    #     # todo check sign
+    #     coord_diff = pred_sequence[..., :-1] - min_sequence[..., :-1]
+    #     coord_diff *= exploration_mask.unsqueeze(-1).repeat(1, 1, 1, D - 1)
+    #     return coord_diff / T
 
-        # todo check sign
-        coord_diff = pred_sequence[..., :-1] - min_sequence[..., :-1]
-        coord_diff *= exploration_mask.unsqueeze(-1).repeat(1, 1, 1, D - 1)
-        return coord_diff / T
+    def get_exploration_loss(self, target_seq, pred_seq, predictions_y_true):
+        min_sequence, min_inc_values, _ = target_seq
+        pred_sequence, pred_inc_values, _ = pred_seq
+        B, A, T = pred_inc_values.shape
+        device = predictions_y_true.device
+
+        # meshgrid cover the space of the env, bounds (0,1) for all dimensions
+        lower, upper = 0, 1
+        n = 100
+
+        # Collect the y values of the env on a grid, so we can compute the (empirical) cdf of
+        # improvements over a given incumbent. This will also avoid the need to live in a
+        # normalized environment (y \in [0,1])
+        x = torch.linspace(lower, upper, n)
+        y = torch.linspace(lower, upper, n)
+        X, Y = torch.meshgrid(x, y, indexing='ij')
+        grid = torch.stack([X, Y], dim=-1).view(-1, 2)  # (n*n, 2)
+        grid = grid.to(device)
+
+        # collect the function values
+        with torch.no_grad():
+            z = self.env.evaluate(grid)
+
+        # calculate the future probability of improvement;
+        # i.e. in the causal sequence, how much probability mass is there below the current incumbent
+        #  this is basically the cdf of the empirical distribution of the function values evaluated
+        #  at the incumbent value
+        pred_ecdf = ECDF(z)(predictions_y_true).unsqueeze(1).repeat(1, A, 1)
+        min_ecdf = ECDF(z)(min_inc_values)
+
+        step_regret_reduction = pred_ecdf - min_ecdf
+        step_regret_reduction[step_regret_reduction < 0] = 0
+
+        return step_regret_reduction
+
+        diff_y = torch.nn.functional.mse_loss(pred_sequence[:, 0, :, -1], predictions_y_true,
+                                              reduction='none')
+
+        # idx = torch.arange(0, T, device=device).view(1, 1, T ).repeat(B, T, 1)
+
+        causal_mask = self.get_causal_mask(B, T, device=device)
+
+        attributions = torch.zeros(B, T, T, device=device)
+        attributions[causal_mask] = diff_y.unsqueeze(1).repeat(1, T, 1)[causal_mask]
+        # batch losses
+        return attributions.mean(dim=(1, 2))
 
     # def get_exploration_loss(self, predictions, predictions_y_true):
     #     """

@@ -1,1 +1,2 @@
 _target_: src.loss.auc_contrib.AUCContributionLoss
+_partial_: true

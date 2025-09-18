@@ -32,7 +32,7 @@ class TinyCausalTransformer(nn.Module):
         )
         # Todo make this configurable
 
-        self.exploration = 'rnd-sorted'  # 'rnd', 'rnd-sorted', 'generate', 'mixed'
+        self.exploration = 'rnd'  # 'rnd', 'rnd-sorted', 'generate', 'mixed'
 
     @property
     def device(self):

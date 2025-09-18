@@ -2,7 +2,7 @@ from src.callbacks.abstract_callback import AbstractCallback
 
 
 class PlotTrajectoriesCallback(AbstractCallback):
-    def __init__(self, plot_every_n_epochs=1000):
+    def __init__(self, plot_every_n_epochs=100):
         super().__init__()
         self.plot_every_n_epochs = plot_every_n_epochs
 
