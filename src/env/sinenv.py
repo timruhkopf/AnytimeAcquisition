@@ -159,8 +159,8 @@ class SinEnv:
 
         # Add trace path on surface if given
         if traces is not None:
-            X_trace, Y_trace = traces[..., :2].numpy(), traces[..., -1].flatten().numpy()
-            Z_trace = self.evaluate(X_trace).numpy()
+            X_trace, Y_trace = traces[..., :2].cpu().numpy(), traces[..., -1].flatten().cpu().numpy()
+            Z_trace = self.evaluate(X_trace).cpu().numpy()
             # Z_trace = ((Z_trace_raw - vmin) / (vmax - vmin + 1e-9)).cpu().numpy()
             if plot_points_only:
                 trace_points = go.Scatter3d(
