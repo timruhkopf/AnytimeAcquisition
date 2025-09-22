@@ -239,7 +239,7 @@ class AUCContributionLoss(nn.Module):
         d[d < 0] = 1  # we have negative distances on the next incumbent (first step)
         # because the idx will be 0 again! Since it costs one token to acquire this, we assign 1
 
-        inc_distances = torch.zeros(B, A, T)
+        inc_distances = torch.zeros(B, A, T, device=inc_mask.device)
         inc_distances[inc_B[:-1], inc_A[:-1], inc_T[:-1]] = d.float()
         inc_distances = inc_distances[..., :-1]
 

@@ -21,7 +21,7 @@ def main(cfg: DictConfig):
 
         env = instantiate(cfg.environment, device=device, logger=file_logger)
         model = instantiate(cfg.model, logger=file_logger)
-        trainer = instantiate(cfg.trainer, model=model, env=env, logger=file_logger)
+        trainer = instantiate(cfg.trainer, device=device, model=model, env=env, logger=file_logger)
 
         trainer.train(cfg.num_epochs)
 

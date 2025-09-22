@@ -3,25 +3,39 @@ import torch.nn as nn
 from transformers import GPT2Config, GPT2Model
 
 from src.loss.auc_alternatives import find_element_wise_optimal_trajectory
+from src.utils.bar_distribution import BarDistribution
 
 
 class TinyCausalTransformer(nn.Module):
-    def __init__(self, d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=4, logger=None):
+    def __init__(
+            self,
+            d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=4,
+            logger=None,
+            *args, **kwargs
+    ):
         super().__init__()
         self.d_in = d_in
+
+        self.get_model(d_in, d_model, n_heads, max_len, n_layers, *args, **kwargs)
         # Project input up to model dim
+
+        # Todo make this configurable
+
+        self.exploration = 'rnd'  # 'rnd', 'rnd-sorted', 'generate', 'mixed'
+
+    def get_model(self, d_in, d_model, n_heads, max_len, n_layers):
         self.in_proj = nn.Linear(d_in, d_model)
 
-        # Tiny GPT2 stack
-        config = GPT2Config(
-            n_embd=d_model,
-            n_layer=n_layers,
-            n_head=n_heads,
-            n_positions=max_len,
-            n_ctx=max_len,
-            vocab_size=1_000,  # dummy, not used
+        self.transformer = GPT2Model(
+            GPT2Config(
+                n_embd=d_model,
+                n_layer=n_layers,
+                n_head=n_heads,
+                n_positions=max_len,
+                n_ctx=max_len,
+                vocab_size=1_000,  # dummy, not used
+            )
         )
-        self.transformer = GPT2Model(config)
 
         # Project back down to d_in and squash
         self.out_proj = nn.Sequential(
@@ -30,9 +44,6 @@ class TinyCausalTransformer(nn.Module):
             nn.Linear(d_model, d_in),
             nn.Sigmoid()
         )
-        # Todo make this configurable
-
-        self.exploration = 'rnd'  # 'rnd', 'rnd-sorted', 'generate', 'mixed'
 
     @property
     def device(self):
@@ -90,12 +101,11 @@ class TinyCausalTransformer(nn.Module):
         # based on gpt and linear initialization on 0.5
         initial_condition = env.sample_initial_condition(B=B)
         X = self.generate(
-            env, B=B, T=T-1,
+            env, B=B, T=T - 1,
             initial_condition=initial_condition
-        ) # already has the correct env y value!
-        if self.exploration =='generate':
+        )  # already has the correct env y value!
+        if self.exploration == 'generate':
             return X
-
 
         # FIXME: these trajectories are still hard to learn from: they jump a lot between the
         #  valleys. Maybe do local gradient descent steps from random points instead?
@@ -126,7 +136,7 @@ class TinyCausalTransformer(nn.Module):
         )
         # fixme: use batch dim for alternatives instead!
         if self.exploration == 'mixed':
-          return min_sequence.squeeze(1)
+            return min_sequence.squeeze(1)
 
         raise ValueError(f"Unknown exploration strategy {self.exploration}")
 
