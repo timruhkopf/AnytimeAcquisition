@@ -1,8 +1,11 @@
 import torch
 from torch import nn
+import numpy as np
+import matplotlib.pyplot as plt
 from functools import lru_cache
 
 from src.loss.auc_alternatives import find_element_wise_optimal_trajectory
+from src.utils.bar_distribution import BarDistribution
 
 
 class ECDF(torch.nn.Module):
@@ -40,6 +43,8 @@ class AUCContributionLoss(nn.Module):
     def __init__(self, env):
         super().__init__()
         self.env = env
+        self.borders = torch.linspace(0, 1, 100).to(env.device)
+        self.criterion = BarDistribution(borders=self.borders, )
 
     @lru_cache(maxsize=5)
     def get_causal_mask(self, B, T, device) -> torch.Tensor:
@@ -162,14 +167,75 @@ class AUCContributionLoss(nn.Module):
             z = self.env.evaluate(grid)
 
         # calculate the future probability of improvement;
-        # i.e. in the causal sequence, how much probability mass is there below the current incumbent
-        #  this is basically the cdf of the empirical distribution of the function values evaluated
-        #  at the incumbent value
+        # How much area in X is still better than the incumbent?
+        # i.e. if i sampled at x at random what was the likelihood of an improvement?
+        #  this is basically the cdf of the empirical distribution of the grid function values
+        #  evaluated at the current incumbent value
         pred_ecdf = ECDF(z)(predictions_y_true).unsqueeze(1).repeat(1, A, 1)
         min_ecdf = ECDF(z)(min_inc_values)
 
         step_regret_reduction = pred_ecdf - min_ecdf
         step_regret_reduction[step_regret_reduction < 0] = 0
+
+        target_y = mean_below_thresholds(values=z, thresholds=min_inc_values.view(-1)).reshape(B, A,
+                                                                                               -1)
+
+        # We can calculate the estimated volume
+        regret_dists = batched_binned_distributions(
+            values=z,
+            thresholds=predictions_y_true.view(-1),
+            bin_edges=self.borders
+        )
+        regret_dists = regret_dists.reshape(B, A, T, -1).float()
+        regret_dists /= regret_dists.sum(dim=-1).unsqueeze(-1).repeat(1, 1, 1, len(self.borders) - 1)  #
+        # grid.shape[0] # dividing by grid will give us the actual volume.
+
+        regret_dists += 1e-9
+        regret_dist_logits = torch.log(regret_dists)
+        pred_nll = self.criterion(logits=regret_dist_logits, y=target_y)
+
+        # We can calculate the volume under the better alternative
+        regret_dists = batched_binned_distributions(
+            values=z,
+            thresholds=min_inc_values.view(-1),
+            bin_edges=self.borders
+        )
+        regret_dists = regret_dists.reshape(B, A, T, -1).float()
+        regret_dists /= regret_dists.sum(dim=-1).unsqueeze(-1).repeat(1, 1, 1,
+                                                                      len(self.borders) - 1)  #
+        # grid.shape[0] # dividing by grid will give us the actual volume.
+
+
+        # get the logits
+        regret_dists += 1e-9
+        regret_dist_logits = torch.log(regret_dists)
+        target_nll = self.criterion(logits=regret_dist_logits, y=target_y)
+
+        # loss = (target_nll - pred_nll)
+        # loss[loss<0] *= 0
+
+        # inc_mask = self.get_inc_mask(min_inc_values)
+        # exploration_mask = ~inc_mask
+
+        # now calculate the per calculate the per step nll improvement to decide on how much we
+        # want to pull towards that solution for exploration steps
+
+        # plot_distributions_colored(regret_dists[2, 0].cpu().numpy(), bin_centers=self.borders[
+        #     :-1].cpu().numpy())
+
+        # TODO consider expected regret; i.e. given the points that still satisfy the contour of
+        #  an improvement, what is the expected improvement; i.e. the mean of the
+        #  points that are better than the incumbent. This would allow us to quantify the
+        #  expected regret. At every step we'd need to calculate the average over all points
+        #  that are within the contour of the incumbent. This is probably expensive.
+
+        # FIXME: notice how both the PI and EI are not reduced by an exploration step just yet,
+        #  so the information is basically the same as the incumbent auc!
+
+        # if we had a GP, knowing and knowing the lengthscale, we could compute the expected
+        # improvement given the informational state; we kind of try to estimate the expected
+        # improvement, which depends on the lengthscale and the uncertainty estimates that
+        # we derive off of that. 
 
         return step_regret_reduction
 
@@ -284,3 +350,83 @@ class AUCContributionLoss(nn.Module):
         auc_diff = y_diff * delta_t
 
         return auc_diff, joint_inc_mask
+
+
+def mean_below_thresholds(values: torch.Tensor, thresholds: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the mean of values below each threshold.
+    :param values:
+    :param thresholds:
+    :return:
+    """
+    # values: shape (N,)
+    # thresholds: shape (M,) descending
+    values = values.unsqueeze(0)  # shape (1, N)
+    thresholds = thresholds.unsqueeze(1)  # shape (M, 1)
+    mask = values < thresholds  # shape (M, N)
+    n_selected = mask.sum(dim=1)  # number of selections per threshold (M,)
+    sums = (mask * values).sum(dim=1)  # sum of selected values (M,)
+    means = torch.where(n_selected > 0, sums / n_selected, torch.zeros_like(sums))
+    return means
+
+
+
+def batched_binned_distributions(values, thresholds, bin_edges):
+    """
+    Compute histograms of values below each threshold, binned by bin_edges.
+    :param values: shape (N,)
+    :param thresholds: shape (M,)
+    :param bin_edges: shape (B+1,)
+    :return: histograms of shape (M, B)
+    """
+
+    # Broadcast values and thresholds
+    values = values.unsqueeze(0)  # (1, N)
+    thresholds = thresholds.unsqueeze(1)  # (M, 1)
+    mask = values < thresholds  # (M, N)
+
+    # Bucketize for bins (returns indices in 0...B-1)
+    # Expand to (1, N) for batch, will be broadcast for thresholds
+    bin_indices = torch.bucketize(values, bin_edges) - 1  # (1, N)
+
+    num_bins = len(bin_edges) - 1
+    num_thresholds = len(thresholds)
+
+    # Broadcast mask and bin_indices
+    hists = torch.zeros((num_thresholds, num_bins), dtype=torch.long, device=values.device)
+    for b in range(num_bins):
+        # For bin b, mask for elements assigned to bin b and values < threshold
+        in_bin = (bin_indices == b)
+        selected = mask & in_bin
+        hists[:, b] = selected.sum(dim=1)
+    return hists
+
+
+
+def plot_distributions_colored(tensor, bin_centers=None, cmap_name='viridis', show_colorbar=True,
+                               figsize=(10, 6)):
+    tensor = np.array(tensor)  # Accept PyTorch or numpy
+    num_distributions, num_bins = tensor.shape
+
+    if bin_centers is None:
+        bin_centers = np.arange(num_bins)
+
+    cmap = plt.get_cmap(cmap_name)
+    colors = [cmap(i / (num_distributions - 1)) for i in range(num_distributions)]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    for i in range(num_distributions):
+        ax.plot(bin_centers, tensor[i], color=colors[i], alpha=0.8)
+
+    ax.set_xlabel('Bin')
+    ax.set_ylabel('Probability')
+    ax.set_title('All distributions (colored by index)')
+
+    if show_colorbar:
+        sm = plt.cm.ScalarMappable(cmap=cmap,
+                                   norm=plt.Normalize(vmin=0, vmax=num_distributions - 1))
+        sm.set_array([])  # To silence warning
+        fig.colorbar(sm, ax=ax, label='Distribution index')
+
+    plt.tight_layout()
+    plt.show()
