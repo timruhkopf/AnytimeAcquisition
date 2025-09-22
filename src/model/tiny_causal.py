@@ -11,6 +11,7 @@ class TinyCausalTransformer(nn.Module):
             self,
             d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=4,
             logger=None,
+            positional_emb=False,
             *args, **kwargs
     ):
         super().__init__()
@@ -18,6 +19,9 @@ class TinyCausalTransformer(nn.Module):
 
         self.get_model(d_in, d_model, n_heads, max_len, n_layers, *args, **kwargs)
         # Project input up to model dim
+
+        self.positional_emb = positional_emb
+        self.logger = logger
 
         # Todo make this configurable
         self.exploration = 'rnd'  # 'rnd', 'rnd-sorted', 'generate', 'mixed'
@@ -39,8 +43,9 @@ class TinyCausalTransformer(nn.Module):
         # The GPT model automatically introduce a positional encoding
         #  --because once we have the subset of points causally, they can be considered a set,
         #  so here we drop the positional encoding!
-        self.transformer.wpe.weight.data.zero_()
-        self.transformer.wpe.weight.requires_grad_(False)
+        if self.positional_emb:
+            self.transformer.wpe.weight.data.zero_()
+            self.transformer.wpe.weight.requires_grad_(False)
 
         # Project back down to d_in and squash
         self.out_proj = nn.Sequential(
