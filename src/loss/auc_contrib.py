@@ -167,6 +167,36 @@ class AUCContributionLoss(nn.Module):
         # alt_inc_values = alt_inc.values  # (B,A,T)
         # alt_inc_indices = alt_inc.indices  # (B,A,T)
 
+        if False:
+            import torch
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+            import pandas as pd
+
+            # (Residuals plot on y vs time) --------------------
+            # will be computed on the entire batch & alternatives ==1
+            t = torch.linspace(1, T, T)
+
+            residuals_flat = (predictions_y_true.unsqueeze(1) - predictions[..., -1]
+                              ).view(-1, T).cpu()
+            # Convert to long dataframe format for seaborn plotting
+            data = []
+            for t in range(T):
+                for val in residuals_flat[:, t].detach().numpy():
+                    data.append((t + 1, val))  # t+1 for 1-based time indexing
+
+            df = pd.DataFrame(data, columns=['Time', 'Residual'])
+
+            # Plot distribution of residuals over time with violin plot
+            plt.figure(figsize=(14, 6))
+            sns.violinplot(x='Time', y='Residual', data=df, inner="quartile", scale='width')
+            plt.title('Distribution of Residuals over Time')
+            plt.xlabel('Time step (t)')
+            plt.ylabel('Residual value')
+            plt.xticks(rotation=45)
+            plt.grid(True, linestyle='--', alpha=0.5)
+            plt.show()
+
         # find better alternatives
         min_sequence, min_inc_values, min_inc_indices = (
             find_element_wise_optimal_trajectory(
