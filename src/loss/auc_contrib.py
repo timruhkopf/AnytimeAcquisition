@@ -125,6 +125,9 @@ class AUCContributionLoss(nn.Module):
         # collect the time difference between the incumbents and normalize by n time steps
         delta_t = self.get_inc_time_delta(joint_inc_indices, joint_inc_mask) / T
 
+        # FIXME: this is only a quick fix; the last step would need to be handled more carefully
+        # this is only correct if there occurs an incumbent change on the last position.
+        delta_t = torch.cat([delta_t, torch.ones(B, A, 1, device=delta_t.device)/T], dim=-1)
         # compute the rectangles
         auc_diff = y_diff * delta_t
 
@@ -173,13 +176,7 @@ class AUCContributionLoss(nn.Module):
         target_seq = (min_sequence, min_inc_values, min_inc_indices)
         pred_seq = (predictions, pred_inc_values, pred_inc.indices)
 
-        auc, joint_mask = self.find_instantaneous_regret(target_seq, pred_seq)
-
-        auc_steps = pred_inc_values - min_inc_values
-        pred_inc_mask = self.get_inc_mask(pred_inc_values)
-        min_inc_mask = self.get_inc_mask(min_inc_values)
-        joint_inc_mask = torch.logical_or(pred_inc_mask, min_inc_mask)
-
+        auc_steps, joint_inc_mask = self.find_instantaneous_regret(target_seq, pred_seq)
 
         # self.exploration_bonus(target_seq, pred_seq)
 
