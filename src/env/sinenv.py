@@ -50,15 +50,15 @@ class SinEnv:
 
         return Z.min().item(), Z.max().item()
 
-
-    def resample(self, a_range=(0.5, 2.0), b_range=(1, 10), phi_range=(0, 2*math.pi),
-                 m_range=(-1, 1), theta_range=(0, 2*math.pi)):
+    def resample(self, a_range=(0.5, 2.0), b_range=(1, 10), phi_range=(0, 2 * math.pi),
+                 m_range=(-1, 1), theta_range=(0, 2 * math.pi)):
         """Randomly sample new environment parameters from given ranges (torch.uniform)."""
         self.a = (a_range[1] - a_range[0]) * torch.rand(1, device=self.device) + a_range[0]
         self.b = (b_range[1] - b_range[0]) * torch.rand(1, device=self.device) + b_range[0]
         self.phi = (phi_range[1] - phi_range[0]) * torch.rand(1, device=self.device) + phi_range[0]
         self.m = (m_range[1] - m_range[0]) * torch.rand(1, device=self.device) + m_range[0]
-        self.theta = (theta_range[1] - theta_range[0]) * torch.rand(1, device=self.device) + theta_range[0]
+        self.theta = (theta_range[1] - theta_range[0]) * torch.rand(1, device=self.device) + \
+                     theta_range[0]
 
         self.min, self.max = self.get_bounds()
 
@@ -75,8 +75,10 @@ class SinEnv:
         """
 
         x, y = X[..., 0], X[..., 1]
-        x = x.to(self.device) if isinstance(x, torch.Tensor) else torch.tensor(x, device=self.device)
-        y = y.to(self.device) if isinstance(y, torch.Tensor) else torch.tensor(y, device=self.device)
+        x = x.to(self.device) if isinstance(x, torch.Tensor) else torch.tensor(x,
+                                                                               device=self.device)
+        y = y.to(self.device) if isinstance(y, torch.Tensor) else torch.tensor(y,
+                                                                               device=self.device)
         x_r, y_r = self.rotate(x, y)
         val = (self.a1 * torch.sin(self.b1 * 2 * math.pi * x_r + self.phi1)
                + self.a2 * torch.sin(self.b2 * 2 * math.pi * y_r + self.phi2)
@@ -115,7 +117,89 @@ class SinEnv:
         X[..., -1] = self.evaluate(X[..., :-1])
         return X
 
-    def plot3d(self, resolution=200, traces=None, plot_points_only=False, trajectories=None):
+
+    def plot3d_matplotlib(self, resolution=200, traces=None, plot_points_only=False):
+        """
+        Simplified 3D surface plot with optional trajectory paths in matplotlib.
+
+        Params:
+        - resolution: grid resolution for surface.
+        - traces: torch tensor (batch_size, seq_len, 2) of (x, y) trajectory points.
+        - plot_points_only: if True, plot only points for trajectories.
+        """
+
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D  # needed for 3d projection
+
+        # Generate surface grid
+        X = torch.linspace(0, 1, resolution, device=self.device)
+        Y = torch.linspace(0, 1, resolution, device=self.device)
+        XX, YY = torch.meshgrid(X, Y, indexing='xy')
+        flat_in = torch.stack([XX.flatten(), YY.flatten()], dim=-1)
+        ZZ = self.evaluate(flat_in).reshape(XX.shape)
+
+        X_np, Y_np, Z_np = XX.cpu().numpy(), YY.cpu().numpy(), ZZ.cpu().numpy()
+
+        fig, (ax3d, ax2d) = plt.subplots(1, 2, figsize=(14, 6),
+                                         gridspec_kw={'width_ratios': [2, 1]})
+
+        ax3d.axis('off')
+
+        # 3D Surface plot without axes/bounding box
+        ax3d = fig.add_subplot(1, 2, 1, projection='3d')
+        surf = ax3d.plot_surface(X_np, Y_np, Z_np, cmap='viridis', alpha=0.85, edgecolor='none')
+
+        # Set angled top view
+        ax3d.view_init(elev=80, azim=45)
+
+        # Plot trajectories on surface if provided
+        if traces is not None:
+            traces_np = traces.cpu().numpy()
+            batch_size, seq_len, _ = traces_np.shape
+
+            for traj in traces_np:
+                traj_torch = torch.tensor(traj, device=self.device)
+                Z_traj = self.evaluate(traj_torch[..., :-1]).cpu().numpy()
+
+                if plot_points_only:
+                    ax3d.scatter(traj[:, 0], traj[:, 1], Z_traj, color='red', s=20)
+                else:
+                    ax3d.plot(traj[:, 0], traj[:, 1], Z_traj, marker='o', linewidth=1, color='red')
+
+        # fig.colorbar(surf, ax=ax3d, shrink=0.5, aspect=10)
+
+        # 2D incumbent plot - only raw curve with markers on incumbent changes
+        if traces is not None:
+            traces_np = traces.cpu().numpy()
+            batch_size, seq_len, _ = traces_np.shape
+
+            # Evaluate performance sequences
+            performance = np.zeros((batch_size, seq_len))
+            for i in range(batch_size):
+                traj_torch = torch.tensor(traces_np[i], device=self.device)
+                performance[i] = self.evaluate(traj_torch[..., :-1]).cpu().numpy()
+
+            for i in range(batch_size):
+                seq = performance[i]
+                ax2d.plot(range(seq_len), seq, label=f'Seq {i}')
+
+                # Find points where incumbent (min so far) changes
+                incumbent = np.minimum.accumulate(seq)
+                changed_indices = np.where(np.diff(incumbent, prepend=np.inf) < 0)[0]
+                ax2d.scatter(changed_indices, seq[changed_indices], color='black', marker='x', s=50)
+
+            ax2d.set_xlabel('Timestep')
+            ax2d.set_ylabel('Performance (lower better)')
+            ax2d.set_title('Raw Trajectories with Incumbent Change Markers')
+            ax2d.legend(fontsize='small', loc='upper right')
+
+        plt.tight_layout()
+        plt.show()
+
+    def plot3d(self, fig=None, resolution=200, traces=None, plot_points_only=False,
+               trajectories=None,
+               static=True):
         """
         Plots the environment surface and optionally trajectories with their AUC loss side by side.
 
@@ -144,14 +228,16 @@ class SinEnv:
         XX_np, YY_np, ZZ_np = XX.cpu().numpy(), YY.cpu().numpy(), ZZ.cpu().numpy()
 
         # Setup subplot figure: 1 row, 2 cols if trajectories given, else just 1 col
-        if traces is not None:
-            fig = make_subplots(
-                rows=1, cols=2,
-                                specs=[[{'type': 'surface'}, {'type': 'xy'}]],
-                subplot_titles=("Environment Surface", "Trajectories AUC")
-            )
-        else:
-            fig = make_subplots(rows=1, cols=1, specs=[[{'type': 'surface'}]])
+        if fig is None:
+            if traces is not None:
+                fig = make_subplots(
+                    rows=1, cols=2,
+                    specs=[[{'type': 'surface'}, {'type': 'xy'}]],
+                    subplot_titles=("Environment Surface", "Trajectories AUC")
+                )
+            else:
+                fig = make_subplots(rows=1, cols=1, specs=[[{'type': 'surface'}]])
+
 
         # Surface plot on left
         surface = go.Surface(z=ZZ_np, x=XX_np, y=YY_np, colorscale='Viridis', opacity=0.85)
@@ -159,7 +245,8 @@ class SinEnv:
 
         # Add trace path on surface if given
         if traces is not None:
-            X_trace, Y_trace = traces[..., :2].cpu().numpy(), traces[..., -1].flatten().cpu().numpy()
+            X_trace, Y_trace = traces[..., :2].cpu().numpy(), traces[
+                ..., -1].flatten().cpu().numpy()
             Z_trace = self.evaluate(X_trace).cpu().numpy()
             # Z_trace = ((Z_trace_raw - vmin) / (vmax - vmin + 1e-9)).cpu().numpy()
             if plot_points_only:
@@ -202,11 +289,8 @@ class SinEnv:
             height=600,
             template='plotly_white',
             yaxis_range=[0, 1]
-
         )
-        # fig.show()
-        plot(fig)
-        plt.clf()
+        return fig
 
 
 if __name__ == '__main__':
@@ -216,4 +300,3 @@ if __name__ == '__main__':
     print("Approx global min (grid):", env.approx_global_min())
 
     env.plot3d(traces=torch.rand(3, 10, 3))
-

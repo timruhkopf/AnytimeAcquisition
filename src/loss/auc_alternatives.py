@@ -120,31 +120,6 @@ class AUCAlternativesLoss(nn.Module):
 
 
 
-def find_element_wise_optimal_trajectory(predictions, predictions_y_true, alternatives,
-                                         penalize_y_pred=False):
-    device = predictions.device
-    pred_y = predictions_y_true
-    y = alternatives[..., -1]
-    B, A, T, D = alternatives.shape
-
-    assert predictions.shape == (B, A, T, D)
-    assert pred_y.shape == (B, A, T)
-
-    # find the joint incumbent trajectory from
-    mask = pred_y >= y  # shape (B, A, T), bool
-    # expand to collect the entire observation vector (D)
-    mask_expanded = mask.unsqueeze(-1).repeat(1, 1, 1, D)  # shape (B, A, T, D)
-
-    if penalize_y_pred:
-        # Consider Explicitly applying a loss on the predicted y value would mean instead of
-        #  p we had predictions in here!
-        p = torch.cat([predictions[..., :-1], pred_y.unsqueeze(-1)], dim=-1)
-    else:
-        p = predictions
-    min_sequence = torch.where(mask_expanded, p, alternatives) # shape (B, A, T, D)
-    inc_values, inc_indices = torch.cummin(min_sequence[..., -1], dim=-1)
-
-    return min_sequence, inc_values, inc_indices
 
 if __name__ == '__main__':
     # B, A, T, D = 2, 3, 4, 2

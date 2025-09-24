@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import GPT2Config, GPT2Model
 
-from src.loss.auc_alternatives import find_element_wise_optimal_trajectory
+from src.loss.auc_contrib import find_element_wise_optimal_trajectory
 from src.utils.bar_distribution import BarDistribution
 
 
@@ -17,10 +17,10 @@ class TinyCausalTransformer(nn.Module):
         super().__init__()
         self.d_in = d_in
 
+        self.positional_emb = positional_emb
         self.get_model(d_in, d_model, n_heads, max_len, n_layers, *args, **kwargs)
         # Project input up to model dim
 
-        self.positional_emb = positional_emb
         self.logger = logger
 
         # Todo make this configurable
@@ -109,11 +109,14 @@ class TinyCausalTransformer(nn.Module):
 
         # avoid representational collapse from initial clustering in the center
         # based on gpt and linear initialization on 0.5
-        initial_condition = env.sample_initial_condition(B=B)
-        X = self.generate(
-            env, B=B, T=T - 1,
-            initial_condition=initial_condition
-        )  # already has the correct env y value!
+
+        if self.exploration in ['generate', 'mixed']:
+            initial_condition = env.sample_initial_condition(B=B)
+            X = self.generate(
+                env, B=B, T=T - 1,
+                initial_condition=initial_condition
+            )  # already has the correct env y value!
+
         if self.exploration == 'generate':
             return X
 
