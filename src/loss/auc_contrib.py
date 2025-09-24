@@ -27,7 +27,8 @@ class AUCContributionLoss(nn.Module):
         B, A, T = inc_values.shape
         inc_mask = torch.cat([
             torch.ones(B, 1, 1, dtype=torch.bool, device=device),
-            torch.diff(inc_values, dim=-1) < 0
+            # torch.diff(inc_values, dim=-1) < 0
+            inc_values[..., :-1] > inc_values[..., 1:]
         ],
             dim=-1
         ).to(device)
@@ -115,11 +116,11 @@ class AUCContributionLoss(nn.Module):
         joint_inc_indices = (joint_inc_non_zero).cummax(dim=-1).indices
 
         # collect the y value differences
-        upper_y = torch.gather(pred_sequence[..., -1], dim=-1, index=joint_inc_indices)
+        upper_y = torch.gather(pred_inc_values, dim=-1, index=joint_inc_indices)
         lower_y = torch.gather(min_sequence[..., -1], dim=-1, index=joint_inc_indices)
-        upper_y_diff = torch.diff(upper_y, dim=-1)
-        lower_y_diff = torch.diff(lower_y, dim=-1)
-        y_diff = upper_y_diff - lower_y_diff
+
+        y_diff = upper_y - lower_y
+
 
         # collect the time difference between the incumbents and normalize by n time steps
         delta_t = self.get_inc_time_delta(joint_inc_indices, joint_inc_mask) / T
@@ -173,21 +174,38 @@ class AUCContributionLoss(nn.Module):
         pred_seq = (predictions, pred_inc_values, pred_inc.indices)
 
         auc, joint_mask = self.find_instantaneous_regret(target_seq, pred_seq)
+
+        auc_steps = pred_inc_values - min_inc_values
+        pred_inc_mask = self.get_inc_mask(pred_inc_values)
+        min_inc_mask = self.get_inc_mask(min_inc_values)
+        joint_inc_mask = torch.logical_or(pred_inc_mask, min_inc_mask)
+
+
         # self.exploration_bonus(target_seq, pred_seq)
 
         # compute the coordinate differences
         # TODO: check sign!
         coord_diff = torch.nn.functional.mse_loss(predictions, min_sequence, reduction='none')
-        coord_diff *= joint_mask.unsqueeze(-1).repeat(1, 1, 1, D)
+        coord_diff *= joint_inc_mask.unsqueeze(-1).repeat(1, 1, 1, D)
 
         # deselect the y value difference here and multiply with the contribution
-        regret = (coord_diff[:, :, :T - 1, :-1] * auc.unsqueeze(-1).repeat(1, 1, 1, D - 1))
+        # regret = (coord_diff[:, :, :T - 1, :-1] * auc_steps.unsqueeze(-1).repeat(1, 1, 1, D - 1))
+        penalize_y=True
+        if penalize_y:
+            regret = coord_diff * auc_steps.unsqueeze(-1).repeat(1, 1, 1, D)
+        else:
+            regret = coord_diff[..., :-1] * auc_steps.unsqueeze(-1).repeat(1, 1, 1, D - 1)
+
+
 
         # fixme: instead of mean on the regret components, take the weighted average based on
         #  the relative final regret (Batch-wise weighing)
-        final_regret = 1- min_inc_values[..., -1].view(B, 1, 1, 1)
-        return (regret * (final_regret / B)).sum()
+        # final_regret = 1- min_inc_values[..., -1].view(B, 1, 1, 1)
+        # return (regret * (final_regret / B)).sum()
 
+        # weigh by overall auc difference (i.e. improvement potential)
+        return (regret * auc_steps.sum(dim=-1).view(B, A, 1,1).repeat(1,1,T, regret.shape[
+            -1])).mean()
 
 def find_element_wise_optimal_trajectory(
         predictions, predictions_y_true, alternatives
