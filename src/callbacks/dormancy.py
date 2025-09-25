@@ -1,3 +1,5 @@
+from timeit import timeit
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -6,61 +8,57 @@ from collections import defaultdict
 from src.callbacks.abstract_callback import AbstractCallback
 
 
+from collections import deque, defaultdict
+
 class DormancyTracker:
-    def __init__(self, model, layers_to_track=None, tau=0.05, logger=None):
+    def __init__(self, model, layers_to_track=None, tau=0.05, logger=None, max_capacity=20):
         self.model = model
         self.handles = []
-        self.activations = defaultdict(list)
+        # Use deque with maxlen for memory-bounded activation storage
+        self.activations = defaultdict(lambda: deque(maxlen=max_capacity))
         self.tau = tau
         self.logger = logger
+        self.layers_to_track = layers_to_track
+        self.add_hooks(layers_to_track)
 
-        # By default, track MLP feed-forward layers (c_fc) inside transformer blocks h
+    def add_hooks(self, layers_to_track=None):
         if layers_to_track is None:
-            layers_to_track = [blk.mlp.c_fc for blk in model.transformer.h]
+            layers_to_track = [blk.mlp.c_fc for blk in self.model.transformer.h]
 
         for idx, layer in enumerate(layers_to_track):
-            # Register forward hook to save activations
             handle = layer.register_forward_hook(self._make_hook(idx))
             self.handles.append(handle)
 
     def _make_hook(self, idx):
         def hook(module, inp, out):
-            # out shape: (B, T, H), get absolute activations
             act = out.detach().cpu()
-            self.activations[idx].append(act)
-
+            self.activations[idx].append(act)  # deque automatically discards oldest when full
         return hook
 
     def clear(self):
-        self.activations = defaultdict(list)
+        # Clear all deques by resetting them
+        self.activations = defaultdict(lambda: deque(maxlen=next(iter(self.activations.values())).maxlen if self.activations else 100))
 
     def compute_dormancy_scores(self, step):
-        """
-        Returns per-layer neuron dormancy scores (normalized average activations).
-        """
         dormancy_scores = {}
-        for layer_idx, acts in self.activations.items():
-            acts = torch.cat(acts, dim=0)  # concatenate batches and tokens (B*T, H)
-            acts = acts.view(-1, acts.shape[-1])  # flatten all positions
-            avg_abs = acts.abs().mean(dim=0)  # average absolute activations per neuron (H,)
+        for layer_idx, acts_deque in self.activations.items():
 
-            # Normalize scores to sum to 1 within the layer (or equivalently normalize by mean)
+            if len(acts_deque) == 0:
+                continue
+
+            acts = torch.cat(list(acts_deque), dim=0)
+            acts = acts.view(-1, acts.shape[-1])
+            avg_abs = acts.abs().mean(dim=0)
             normalized = avg_abs / avg_abs.mean()
-
             dormancy_scores[layer_idx] = normalized
 
         if self.logger is not None:
-            log = { 'epoch': step,}
+            log = {'epoch': step}
             for layer_idx, scores in dormancy_scores.items():
                 fraction_dormant = (scores <= self.tau).float().mean().item()
                 log[f'dormant/layer_{layer_idx}_fraction'] = fraction_dormant
-                # print(
-                #     f"Epoch {step} Step {step} Layer {layer_idx}: {fraction_dormant * 100:.2f}% "
-                #     f"dormant neurons")
             self.logger.log(log)
 
-
-            # Clear activations after epoch or at your desired interval
         return dormancy_scores
 
     def remove_hooks(self):
@@ -157,6 +155,7 @@ class DormancyCallback(AbstractCallback):
     def on_train_begin(self):
         self.tracker = DormancyTracker(self.trainer.model, tau=self.tau, logger=self.trainer.logger)
         self.redo = ReDo(self.tracker, tau=self.tau, frequency=self.frequency)
+
 
     def on_epoch_end(self, **kwargs):
         self.redo.apply_redo_if_due(self.epoch)

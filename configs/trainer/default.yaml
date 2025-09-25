@@ -3,6 +3,7 @@ defaults:
   - optimizer@optimizer: adamw
 
 _target_: src.trainer.default_trainer.DefaultTrainer
+B: 256
 callbacks:
   - _target_: src.callbacks.dormancy.DormancyCallback
     frequency: 1000
