@@ -3,13 +3,25 @@ import torch.nn as nn
 from transformers import GPT2Config, GPT2Model
 
 from src.loss.auc_contrib import find_element_wise_optimal_trajectory
-from src.utils.bar_distribution import BarDistribution
+
+
+def tfixup_init(model, num_layers):
+    # Rescale input embeddings and output projections
+    # model.transformer.wte.weight.data.mul_(num_layers ** -0.25)
+    # model.lm_head.weight.data.mul_(num_layers ** -0.25)
+
+    # Scale residual branch weights for each Transformer block
+    for block in model.h:
+        # example for scaling weights in attention and feed-forward
+        for name, param in block.named_parameters():
+            if 'weight' in name:
+                param.data.mul_(num_layers ** -0.5)
 
 
 class TinyCausalTransformer(nn.Module):
     def __init__(
             self,
-            d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=4,
+            d_in=3, d_model=64, n_heads=4, max_len=100, n_layers=8,
             logger=None,
             positional_emb=False,
             *args, **kwargs
@@ -20,6 +32,8 @@ class TinyCausalTransformer(nn.Module):
         self.positional_emb = positional_emb
         self.get_model(d_in, d_model, n_heads, max_len, n_layers, *args, **kwargs)
         # Project input up to model dim
+
+        tfixup_init(self.transformer, n_layers)
 
         self.logger = logger
 
@@ -124,7 +138,7 @@ class TinyCausalTransformer(nn.Module):
         #  valleys. Maybe do local gradient descent steps from random points instead?
         #  This would require that the env is differentiable.
         X_rnd = torch.rand(B, T, self.d_in, device=self.device)
-        X_rnd[..., -1] = env.evaluate(X_rnd[..., :-1])
+        X_rnd[..., -1] = env.evaluate(X_rnd[..., :-1]) # collect ground truth y feedback
 
         if self.exploration == 'rnd-sorted':
             sorted_indices = torch.argsort(X_rnd[..., -1], dim=1, descending=True)

@@ -3,3 +3,9 @@ defaults:
   - optimizer@optimizer: adamw
 
 _target_: src.trainer.default_trainer.DefaultTrainer
+callbacks:
+  - _target_: src.callbacks.dormancy.DormancyCallback
+    frequency: 1000
+    tau: 0.05
+
+  - _target_: src.callbacks.plot_trajectories_callback.PlotTrajectoriesCallback

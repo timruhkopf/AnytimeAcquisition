@@ -168,7 +168,7 @@ class AUCContributionLoss(nn.Module):
         # alt_inc_indices = alt_inc.indices  # (B,A,T)
 
         if False:
-            import torch
+
             import matplotlib.pyplot as plt
             import seaborn as sns
             import pandas as pd
