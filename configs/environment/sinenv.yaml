@@ -1,3 +1,6 @@
-_target_: src.l2o.environment.sinusoid.VectorizedSinusoidEnv
-num_envs: 256
-max_steps: 50
+act_dim: 2
+obs_dim: 3
+env_class:
+  _target_: src.l2o.environment.sinusoid.VectorizedSinusoidEnv
+  num_envs: 256
+  max_steps: 50

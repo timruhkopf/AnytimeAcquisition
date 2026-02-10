@@ -1,14 +1,16 @@
 defaults:
   - environment: sinenv
-  - model: tiny_causal
-  - trainer: default
+  - model: policy
+  - trainer: ppo_trainer
   - _self_
 
 
-num_epochs: 10
+
 seed: 0
 
 # change dir
 hydra:
   job:
     chdir: True
+
+device: cuda

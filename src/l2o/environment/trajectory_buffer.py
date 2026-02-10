@@ -6,6 +6,18 @@ class CumulativeEpisodeBuffer:
         self.total_episodes = total_episodes
         self.max_steps = max_steps
         self.device = device
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+
+
+        self.reset()
+
+    def reset(self):
+        total_episodes, max_steps, obs_dim, act_dim, device = \
+            self.total_episodes, self.max_steps, self.obs_dim, self.act_dim, self.device
+
+        # Metadata to reinstantiate envs where necessary
+        self.seeds = torch.zeros((total_episodes,), dtype=torch.long, device='cpu')
 
         # Core Trajectory Data
         self.obs = torch.zeros((total_episodes, max_steps, obs_dim), device=device)
@@ -15,11 +27,6 @@ class CumulativeEpisodeBuffer:
         self.rewards = torch.zeros((total_episodes, max_steps), device=device)
         self.dones = torch.zeros((total_episodes, max_steps), device=device)
 
-        # Metadata
-        self.seeds = torch.zeros((total_episodes,), dtype=torch.long, device='cpu')
-        self.episode_ptr = 0
-
-    def reset(self):
         self.episode_ptr = 0
 
     def store_batch(self, obs, acts, logprobs, values, dones, seeds):
@@ -77,3 +84,13 @@ class CumulativeEpisodeBuffer:
                 advantages[batch_idx],  # (B_size, T)
                 self.values[batch_idx]  # (B_size, T)
             )
+
+    def to(self, device):
+        """Moves all tensors to the specified device."""
+        self.obs = self.obs.to(device)
+        self.acts = self.acts.to(device)
+        self.logprobs = self.logprobs.to(device)
+        self.values = self.values.to(device)
+        self.rewards = self.rewards.to(device)
+        self.dones = self.dones.to(device)
+        self.seeds = self.seeds.to(device)

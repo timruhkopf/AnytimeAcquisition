@@ -1,31 +1,35 @@
+from tqdm import tqdm
+
 import torch
 
 import torch.nn as nn
 import torch.optim as optim
 
-from src.l2o.dataset.trajectory_buffer import TrajectoryBuffer
+
 from src.l2o.trainer.callbacks.abstract import CallbackHandler
 
 
 class ContinuousPPOTrainer:
-    # TODO MLFLOW & Callback support!
-    def __init__(self, model, env, reward_model, config, callbacks=None, **kwargs):
+
+    def __init__(self, policy, env, reward_model, buffer, device, callbacks=None, **kwargs):
         """
 
-        :param model: Some Transformer-based policy model
+        :param policy: Some Transformer-based policy model
         :param env: a vectorized environment, that supports reset() and step(), but does not return rewards
         :param reward_model: Rewards are computed either at token or sequence level, and to allow flexibility as
          e.g. lookahead rewards, we decouple reward computation from the environment.
         :param config:
         """
-        self.model = model
+        self.policy = policy.to(device)
+        self.device = device
         self.env = env
         self.reward_manager = reward_model
-        self.buffer = TrajectoryBuffer(env.num_envs, env.max_steps, config.input_dim, env.device)
+        self.buffer = buffer
+        self.buffer.to(device)
 
         # FIXME: pass the optimizer externally to allow for more flexibility (e.g. different learning rates for different parameter groups)
         # Consider a scheduler as well, but for now we can just use a fixed learning rate.
-        self.optimizer = optim.AdamW(model.parameters(), lr=kwargs.get("learning_rate", 1e-5), eps=1e-8)
+        self.optimizer = optim.AdamW(policy.parameters(), lr=kwargs.get("learning_rate", 1e-5), eps=1e-8)
 
         # Note: Small Learning Rate for Transformers
         # LLM-based policies are sensitive. We use 5e-6 to 1e-5.
@@ -37,7 +41,7 @@ class ContinuousPPOTrainer:
         self.ent_coef = kwargs.get("ent_coef", 0.01)
         self.vf_coef = kwargs.get("vf_coef", 0.5)
         self.max_grad_norm = kwargs.get("max_grad_norm", 0.5)
-        self.ppo_epochs = kwargs.get("ppo_epochs", 4)
+        self.ppo_steps = kwargs.get("ppo_epochs", 4)
         self.batch_size = kwargs.get("batch_size", 64)  # Rollouts per batch
 
         self.callbacks = callbacks or []
@@ -58,10 +62,11 @@ class ContinuousPPOTrainer:
         :return:
         """
         d = self.device
-        max_steps = self.env.max_steps
+        max_steps = self.env.max_steps # episode length
+        num_envs = self.env.num_envs
 
         self.buffer.reset()
-        num_envs = self.env.num_envs
+
         # Calculate how many full parallel sweeps we need
         num_iterations = total_episodes_to_collect // num_envs
 
@@ -70,7 +75,7 @@ class ContinuousPPOTrainer:
 
         for iteration in range(num_iterations):
             # 1. Reset batch
-            obs_with_y = self.env.reset()  # (N, 3)
+            obs_with_y, _ = self.env.reset()  # (N, 3)
             seeds = self.env.current_seeds.clone()
 
             # Temporary batch storage for this iteration
@@ -78,7 +83,7 @@ class ContinuousPPOTrainer:
             batch_acts = torch.zeros((num_envs, max_steps, 2), device=d)
             batch_logprobs = torch.zeros((num_envs, max_steps), device=d)
             batch_values = torch.zeros((num_envs, max_steps), device=d)
-            batch_rewards = torch.zeros((num_envs, max_steps), device=d)
+
             batch_dones = torch.zeros((num_envs, max_steps), device=d)
 
             curr_input = obs_with_y.unsqueeze(1)
@@ -87,16 +92,17 @@ class ContinuousPPOTrainer:
             with torch.no_grad():
                 for t in range(self.env.max_steps):
                     # 2. KV-Cached Forward Pass
-                    actor_params, value, past_key_values = self.model(
+                    actor_params, value, past_key_values = self.policy(
                         x_raw=curr_input,
                         past_key_values=past_key_values
                     )
 
-                    dist = self.model.get_action_distribution(actor_params)
+                    dist = self.policy.get_action_distribution(actor_params)
                     action = dist.sample()  # (N, 1, 2)
                     log_prob = dist.log_prob(action).sum(-1).squeeze(1)  # (N,)
 
                     # 3. Environment Step
+                    # TODO support environments, that return rewards and dones
                     next_obs_full = self.env.step(action.squeeze(1))
 
                     # Reward Logic (Example: tracking Y=0)
@@ -123,7 +129,7 @@ class ContinuousPPOTrainer:
                 # how much more reward we probably would have gotten."
                 # FIXME: make all_last values the final regret?
 
-                _, last_val, _ = self.model(
+                _, last_val, _ = self.policy(
                     x_raw=curr_input,
                     past_key_values=past_key_values
                 )
@@ -137,7 +143,7 @@ class ContinuousPPOTrainer:
                 )
                 all_last_values[start_idx:end_idx] = last_val.squeeze()
 
-            all_rewards = self.reward_manager.compute_reward(self.buffer.obs)
+            all_rewards = self.reward_manager(self.buffer.obs)
             self.buffer.store_rewards(all_rewards)
 
 
@@ -145,16 +151,16 @@ class ContinuousPPOTrainer:
 
     def train_step(self):
         # 1. Collect Data
-        last_val = self.collect_rollouts()
+        last_val = self.collect_rollouts(total_episodes_to_collect=self.batch_size * self.ppo_steps)
         self.callback_handler.on_event("on_rollout_end", last_val=last_val)
 
         # 2. Compute Advantages
         dataloader = self.buffer.get_loader(last_val, batch_size=self.batch_size)
 
         # 3. PPO Optimization Loop
-        for epoch in range(self.ppo_epochs):
+        for ppo_step in range(self.ppo_steps):
 
-            self.callback_handler.on_event("on_epoch_start", epoch=epoch)
+            self.callback_handler.on_event("on_epoch_start", epoch=self.epoch, ppo_step=ppo_step)
             losses = []
             for batch in dataloader:
                 b_obs, b_acts, b_old_logprobs, b_returns, b_advs, b_old_values = batch
@@ -170,10 +176,10 @@ class ContinuousPPOTrainer:
                 # The model will re-compute the causal mask internally.
                 # No KV-cache needed here (we want gradients for everything).
 
-                actor_params, values, _ = self.model(x_raw=b_obs)
+                actor_params, values, _ = self.policy(x_raw=b_obs)
 
                 # Re-evaluate distribution
-                dist = self.model.get_action_distribution(actor_params)
+                dist = self.policy.get_action_distribution(actor_params)
                 new_log_probs = dist.log_prob(b_acts).sum(-1)
                 entropy = dist.entropy().sum(-1)
 
@@ -214,17 +220,16 @@ class ContinuousPPOTrainer:
                 self.optimizer.zero_grad()
                 loss.backward()
 
-                self.callback_handler.on_event("on_policy_clipping", epoch=epoch)
+                self.callback_handler.on_event("on_policy_clipping", epoch=self.epoch, policy_step=ppo_step)
 
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
             losses = torch.tensor(losses)
-            feedback = self.callback_handler.on_event("on_epoch_end", losses=losses)
+            self.callback_handler.on_event("on_epoch_end", losses=losses)
 
-            if feedback and feedback.get("stop_training"):
-                self.stop_training = True
-                print(f"Early stopping triggered at epoch {epoch + 1}")
+            if self.stop_training:
+                # can be accessed from the callbacks!
                 break
 
         return loss.item()
@@ -232,12 +237,15 @@ class ContinuousPPOTrainer:
     def train(self, total_iterations):
 
         self.callback_handler.on_event('on_train_start')
-        for iter in tqdm(range(total_iterations), desc="PPO Training"):
+        progress_bar = tqdm(range(total_iterations), desc="PPO Training")
+        for epoch in progress_bar:
+            self.epoch = epoch
             if self.stop_training:
                 print("Training stopped early.")
                 break
             loss = self.train_step()
-            print(f"Iteration {iter + 1}/{total_iterations} | Loss: {loss:.4f}")
+            description = f"Epoch {epoch + 1} | Loss: {loss:.4f}"
+            progress_bar.set_description(description)
 
         self.callback_handler.on_event('log_on_train_end')
         self.callback_handler.on_event('on_train_end')
@@ -266,7 +274,7 @@ class PathwisePPOTrainer(ContinuousPPOTrainer):
 
         loss_avg = 0.0
 
-        for epoch in range(self.ppo_epochs):
+        for ppo_step in range(self.ppo_steps):
             for batch in dataloader:
                 # Unpack (Note the extra freq/phase tensors)
                 b_obs, b_acts, b_old_logprobs, b_returns, b_advs, b_old_values, b_freqs, b_phases = batch
@@ -318,4 +326,4 @@ class PathwisePPOTrainer(ContinuousPPOTrainer):
 
                 loss_avg += total_loss.item()
 
-        return loss_avg / (self.ppo_epochs * len(dataloader))
+        return loss_avg / (self.ppo_steps * len(dataloader))

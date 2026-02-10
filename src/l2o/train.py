@@ -15,7 +15,7 @@ import logging
 
 
 
-@hydra.main(version_base='1.1', config_path="../../configs", config_name="config")
+@hydra.main(version_base='1.1', config_path="../../configs", config_name="base")
 def main(cfg: DictConfig) -> None:
 
     logger = logging.getLogger(__name__)
@@ -33,8 +33,9 @@ def main(cfg: DictConfig) -> None:
     if device.type == 'cuda':
         torch.cuda.manual_seed_all(cfg.seed)
 
-    env = instantiate(cfg.env.env_class, device=device)
-    policy = instantiate(cfg.policy.policy_class, device=device)
+    env = instantiate(cfg.environment.env_class, device=device)
+    policy = instantiate(cfg.model.policy_class)
+
 
     trainer = instantiate(
         cfg.trainer.trainer_class,
@@ -46,8 +47,8 @@ def main(cfg: DictConfig) -> None:
     # dictconfig cannot be passed directly; neither a dict with _target_ key
     trainer.config = OmegaConf.to_container(cfg, resolve=True),
 
-    logger.info(f"Starting training for {cfg.trainer.epochs} epochs...")
-    trainer.train(cfg.trainer.total_iterations)
+    logger.info(f"Starting training...")
+    trainer.train(cfg.trainer.epochs)
 
     logger.info("Training completed!")
 

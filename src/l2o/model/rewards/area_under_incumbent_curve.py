@@ -12,11 +12,11 @@ class AUICReward:
     """
 
     def __call__(self, obs_traj):
-        # obs_traj: (Seq, Batch, 3) where [:, :, 2] is Y
+        # obs_traj: (Batch, Seq, hp_dim + 1) where [:, :, -1] is Y
         y_vals = obs_traj[..., -1]
 
         # Cumulative minimum along time dimension
-        incumbents, _ = torch.cummin(y_vals, dim=0)
+        incumbents, _ = torch.cummin(y_vals, dim=1)
 
         # Reward is negative incumbent (minimizing Y = maximizing -Y)
         # We return the full trajectory of rewards
