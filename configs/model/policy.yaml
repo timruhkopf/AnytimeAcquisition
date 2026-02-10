@@ -1,0 +1,7 @@
+_target_: src.l2o.model.policy.L2OPolicy
+input_dim: 3
+d_model: 64
+n_layer: 2
+n_head: 2
+max_len: ${environment.max_steps
+position_encoding_type: "rope"  # Try 'learned' or 'rope'

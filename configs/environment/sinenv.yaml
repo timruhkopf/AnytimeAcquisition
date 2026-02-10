@@ -1,1 +1,3 @@
-_target_: src.env.sinenv.SinEnv
+_target_: src.l2o.environment.sinusoid.VectorizedSinusoidEnv
+num_envs: 256
+max_steps: 50
