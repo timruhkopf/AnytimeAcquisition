@@ -125,3 +125,52 @@ class L2OPolicy(nn.Module):
         beta = F.softplus(actor_params[..., 2:]) + 1.01
         return Beta(alpha, beta)
 
+    @torch.no_grad()
+    def _run_vectorized_episode(self, env):
+        """Handles interaction with the vectorized environment  and KV-caching."""
+        d = env.device # fixme: to self.backbone.device?
+        num_envs = env.num_envs
+        max_steps = env.max_steps
+
+        # Pre-allocate local tensors for this batch
+        traj = {
+            "obs": torch.zeros((num_envs, max_steps, 3), device=d),
+            "acts": torch.zeros((num_envs, max_steps, 2), device=d),
+            "logprobs": torch.zeros((num_envs, max_steps), device=d),
+            "values": torch.zeros((num_envs, max_steps), device=d),
+            "dones": torch.zeros((num_envs, max_steps), device=d),
+        }
+
+        obs, _ = env.reset()
+        seeds = env.current_seeds.clone()
+        curr_input = obs.unsqueeze(1)  # (N, 1, 3) for Transformer
+        past_key_values = None
+
+        for t in range(max_steps):
+            # Policy Forward Pass
+            actor_params, value, past_key_values = self.forward(
+                x_raw=curr_input,
+                past_key_values=past_key_values
+            )
+
+            dist = self.get_action_distribution(actor_params)
+            action = dist.sample()  # (N, 1, 2)
+            log_prob = dist.log_prob(action).sum(-1).squeeze(1)
+
+            # Step Environment
+            next_obs = env.step(action.squeeze(1))
+
+            # Record data
+            traj["obs"][:, t] = curr_input.squeeze(1)
+            traj["acts"][:, t] = action.squeeze(1)
+            traj["logprobs"][:, t] = log_prob
+            traj["values"][:, t] = value.squeeze()
+            traj["dones"][:, t] = float(t == max_steps - 1)
+
+            curr_input = next_obs.unsqueeze(1)
+
+        # Final bootstrap value for GAE
+        _, last_val, _ = self.forward(x_raw=curr_input, past_key_values=past_key_values)
+
+        return traj, seeds, last_val.squeeze()
+

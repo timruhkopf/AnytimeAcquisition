@@ -50,108 +50,78 @@ class ContinuousPPOTrainer:
 
         self.stop_training = False
 
-    def collect_rollouts(self, total_episodes_to_collect):
-        """
-        Collects rollouts from the environment using the current policy.
+    def state_dict(self):
+        return {
+            "model_state_dict": self.policy.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
 
-        This is the most critical part of PPO, as it determines the quality of the data that the model will learn from.
-        We need to ensure that we collect full trajectories (episodes) and store them in a way that allows us to compute
-        advantages later.
 
-        :param total_episodes_to_collect:
-        :return:
-        """
-        d = self.device
-        max_steps = self.env.max_steps # episode length
-        num_envs = self.env.num_envs
+    def train(self, total_iterations):
 
+        self.callback_handler.on_event('on_train_start')
+        progress_bar = tqdm(range(total_iterations), desc="PPO Training")
+        for epoch in progress_bar:
+            self.epoch = epoch
+            if self.stop_training:
+                print("Training stopped early.")
+                break
+            loss = self.train_step()
+            description = f"Epoch {epoch + 1} | Loss: {loss:.4f}"
+            progress_bar.set_description(description)
+
+        self.callback_handler.on_event('log_on_train_end')
+        self.callback_handler.on_event('on_train_end')
+
+    def collect_rollouts(self, env, buffer, total_episodes_to_collect):
+        """Orchestrates collection and computes rewards on full sequences."""
         self.buffer.reset()
-
-        # Calculate how many full parallel sweeps we need
+        num_envs = env.num_envs
         num_iterations = total_episodes_to_collect // num_envs
 
-        # We store the final 'value' of each episode to bootstrap GAE later
-        all_last_values = torch.zeros(total_episodes_to_collect, device=d)
+        all_last_values = torch.zeros(total_episodes_to_collect, device=self.device)
 
-        for iteration in range(num_iterations):
-            # 1. Reset batch
-            obs_with_y, _ = self.env.reset()  # (N, 3)
-            seeds = self.env.current_seeds.clone()
+        for i in range(num_iterations):
+            # 1. Run the vectorized interaction
+            traj, seeds, last_vals = self.policy._run_vectorized_episode(env)
 
-            # Temporary batch storage for this iteration
-            batch_obs = torch.zeros((num_envs, max_steps, 3), device=d)
-            batch_acts = torch.zeros((num_envs, max_steps, 2), device=d)
-            batch_logprobs = torch.zeros((num_envs, max_steps), device=d)
-            batch_values = torch.zeros((num_envs, max_steps), device=d)
+            # 2. Store block in buffer
+            start_idx = i * num_envs
+            end_idx = start_idx + num_envs
 
-            batch_dones = torch.zeros((num_envs, max_steps), device=d)
+            buffer.store_batch(
+                traj["obs"], traj["acts"], traj["logprobs"],
+                traj["values"], traj["dones"], seeds
+            )
 
-            curr_input = obs_with_y.unsqueeze(1)
-            past_key_values = None
+            # Bootstrap final value for GAE
+            # The Purpose: "Infinite Horizon" Bootstrapping In PPO, we use Generalized Advantage Estimation (GAE)
+            # to figure out if an action was good. The value of an action depends on the rewards you get now
+            # plus all the rewards you expect to get in the future.However, your environment has a max_steps limit.
+            # When the environment stops at $t=100$:Was the agent in a great position to keep winning?Or was it
+            # about to fail?If we just assume the future reward is $0$, we bias the model to think the episode "died."
+            # all_last_values contains the Critic’s prediction of the Expected Future Value beyond the last step.
+            # By adding this to our GAE calculation, we tell the model: "Even though the episode ended here, this is
+            # how much more reward we probably would have gotten."
+            # FIXME: make all_last values the final regret?
+            all_last_values[start_idx:end_idx] = last_vals
 
-            with torch.no_grad():
-                for t in range(self.env.max_steps):
-                    # 2. KV-Cached Forward Pass
-                    actor_params, value, past_key_values = self.policy(
-                        x_raw=curr_input,
-                        past_key_values=past_key_values
-                    )
-
-                    dist = self.policy.get_action_distribution(actor_params)
-                    action = dist.sample()  # (N, 1, 2)
-                    log_prob = dist.log_prob(action).sum(-1).squeeze(1)  # (N,)
-
-                    # 3. Environment Step
-                    # TODO support environments, that return rewards and dones
-                    next_obs_full = self.env.step(action.squeeze(1))
-
-                    # Reward Logic (Example: tracking Y=0)
-
-                    done = (t == self.env.max_steps - 1)
-
-                    # Store in local batch
-                    batch_obs[:, t] = curr_input.squeeze(1)
-                    batch_acts[:, t] = action.squeeze(1)
-                    batch_logprobs[:, t] = log_prob
-                    batch_values[:, t] = value.squeeze()
-                    batch_dones[:, t] = float(done)
-
-                    curr_input = next_obs_full.unsqueeze(1)
-
-                # 4. Bootstrap final value for GAE
-                # The Purpose: "Infinite Horizon" Bootstrapping In PPO, we use Generalized Advantage Estimation (GAE)
-                # to figure out if an action was good. The value of an action depends on the rewards you get now
-                # plus all the rewards you expect to get in the future.However, your environment has a max_steps limit.
-                # When the environment stops at $t=100$:Was the agent in a great position to keep winning?Or was it
-                # about to fail?If we just assume the future reward is $0$, we bias the model to think the episode "died."
-                # all_last_values contains the Critic’s prediction of the Expected Future Value beyond the last step.
-                # By adding this to our GAE calculation, we tell the model: "Even though the episode ended here, this is
-                # how much more reward we probably would have gotten."
-                # FIXME: make all_last values the final regret?
-
-                _, last_val, _ = self.policy(
-                    x_raw=curr_input,
-                    past_key_values=past_key_values
-                )
-
-                # Transfer local batch to main buffer
-                start_idx = iteration * num_envs
-                end_idx = start_idx + num_envs
-                self.buffer.store_batch(
-                    batch_obs, batch_acts, batch_logprobs,
-                    batch_values, batch_dones, seeds
-                )
-                all_last_values[start_idx:end_idx] = last_val.squeeze()
-
-            all_rewards = self.reward_manager(self.buffer.obs)
-            self.buffer.store_rewards(all_rewards)
-
+        # 3. Holistic Reward Calculation
+        # We wait until the buffer is full to process rewards in one big batch
+        # This is much faster if your reward_manager is a neural network.
+        all_rewards = self.reward_manager(buffer.obs)
+        buffer.store_rewards(all_rewards)
 
         return all_last_values
 
+
     def train_step(self):
         # 1. Collect Data
-        last_val = self.collect_rollouts(total_episodes_to_collect=self.batch_size * self.ppo_steps)
+        last_val = self.collect_rollouts(
+            env=self.env,
+            buffer=self.buffer,
+            total_episodes_to_collect=self.batch_size * self.ppo_steps
+        )
         self.callback_handler.on_event("on_rollout_end", last_val=last_val)
 
         # 2. Compute Advantages
@@ -160,7 +130,8 @@ class ContinuousPPOTrainer:
         # 3. PPO Optimization Loop
         for ppo_step in range(self.ppo_steps):
 
-            self.callback_handler.on_event("on_epoch_start", epoch=self.epoch, ppo_step=ppo_step)
+            self.callback_handler.on_event("on_policy_epoch_start", epoch=self.epoch, ppo_step=ppo_step)
+
             losses = []
             for batch in dataloader:
                 b_obs, b_acts, b_old_logprobs, b_returns, b_advs, b_old_values = batch
@@ -225,31 +196,14 @@ class ContinuousPPOTrainer:
                 nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
-            losses = torch.tensor(losses)
-            self.callback_handler.on_event("on_epoch_end", losses=losses)
+            losses = torch.tensor(losses).mean().item()
+            self.callback_handler.on_event("on_policy_epoch_end", losses=losses)
 
             if self.stop_training:
                 # can be accessed from the callbacks!
                 break
 
         return loss.item()
-
-    def train(self, total_iterations):
-
-        self.callback_handler.on_event('on_train_start')
-        progress_bar = tqdm(range(total_iterations), desc="PPO Training")
-        for epoch in progress_bar:
-            self.epoch = epoch
-            if self.stop_training:
-                print("Training stopped early.")
-                break
-            loss = self.train_step()
-            description = f"Epoch {epoch + 1} | Loss: {loss:.4f}"
-            progress_bar.set_description(description)
-
-        self.callback_handler.on_event('log_on_train_end')
-        self.callback_handler.on_event('on_train_end')
-
 
 class PathwisePPOTrainer(ContinuousPPOTrainer):
     def __init__(self, model, env, config, lambda_pathwise=0.1):
