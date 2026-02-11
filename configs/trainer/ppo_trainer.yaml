@@ -1,0 +1,33 @@
+defaults:
+  - rewards@trainer_class.reward_model: pfn_explore
+
+#  - loss@loss_fn: seq #  auc_weighed_mse
+#  - optimizer@optimizer: adamw
+
+epochs: 100 # one cycle is (collect_rollouts, ppo_epochs)
+
+trainer_class:
+  _target_: src.l2o.trainer.ppo_trainer.ContinuousPPOTrainer
+
+  buffer:
+    _target_: src.l2o.environment.trajectory_buffer.CumulativeEpisodeBuffer
+    total_episodes: ${environment.env_class.num_envs}
+    max_steps: ${environment.env_class.max_steps}
+    obs_dim: ${environment.obs_dim}
+    act_dim: ${environment.act_dim}
+    device: ${device}
+
+  clip_coef: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  ppo_steps: 4
+  mini_batch_size: 64
+
+  callbacks:
+    - _target_: src.l2o.trainer.callbacks.evaluation.ValidationCallback
+      env:
+        _target_: src.l2o.environment.sinusoid.VectorizedSinusoidEnv
+        num_envs: 100
+        max_steps: 50
+        device: ${device}

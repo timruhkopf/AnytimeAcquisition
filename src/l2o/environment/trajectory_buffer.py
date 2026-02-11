@@ -29,7 +29,7 @@ class CumulativeEpisodeBuffer:
 
         self.episode_ptr = 0
 
-    def store_batch(self, obs, acts, logprobs, values, dones, seeds):
+    def store_batch(self, obs, acts, logprobs, values, rewards, dones, seeds):
         """Stores a chunk of parallel episodes from the vectorized env."""
         num_envs = obs.shape[0]
         end_ptr = self.episode_ptr + num_envs
@@ -46,11 +46,6 @@ class CumulativeEpisodeBuffer:
 
         self.episode_ptr = end_ptr
 
-    def store_rewards(self, rewards):
-        """Stores rewards after all full trajectories are collected."""
-        if rewards.shape != self.rewards.shape:
-            raise ValueError(f"Expected rewards shape {self.rewards.shape}, got {rewards.shape}")
-        self.rewards = rewards
 
     def get_loader(self, last_values, batch_size, gamma=0.99, gae_lambda=0.95):
         """Calculates GAE and yields mini-batches of full sequences."""

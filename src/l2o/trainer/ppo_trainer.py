@@ -24,6 +24,8 @@ class ContinuousPPOTrainer:
         self.device = device
         self.env = env
         self.reward_manager = reward_model
+        self.reward_manager.env = env
+
         self.buffer = buffer
         self.buffer.to(device)
 
@@ -43,6 +45,8 @@ class ContinuousPPOTrainer:
         self.max_grad_norm = kwargs.get("max_grad_norm", 0.5)
         self.ppo_steps = kwargs.get("ppo_epochs", 4)
         self.batch_size = kwargs.get("batch_size", 64)  # Rollouts per batch
+
+        self.epoch = 0
 
         self.callbacks = callbacks or []
         # TODO callbackhandler will need to be ddp rank aware to avoid multiple logging
@@ -89,9 +93,14 @@ class ContinuousPPOTrainer:
             start_idx = i * num_envs
             end_idx = start_idx + num_envs
 
+            # 3. Holistic Reward Calculation
+            # We wait until the buffer is full to process rewards in one big batch
+            # This is much faster if your reward_manager is a neural network.
+            traj['rewards'] = self.reward_manager(traj["obs"])
+
             buffer.store_batch(
                 traj["obs"], traj["acts"], traj["logprobs"],
-                traj["values"], traj["dones"], seeds
+                traj["values"], traj["rewards"], traj["dones"], seeds
             )
 
             # Bootstrap final value for GAE
@@ -106,11 +115,6 @@ class ContinuousPPOTrainer:
             # FIXME: make all_last values the final regret?
             all_last_values[start_idx:end_idx] = last_vals
 
-        # 3. Holistic Reward Calculation
-        # We wait until the buffer is full to process rewards in one big batch
-        # This is much faster if your reward_manager is a neural network.
-        all_rewards = self.reward_manager(buffer.obs)
-        buffer.store_rewards(all_rewards)
 
         return all_last_values
 
@@ -204,80 +208,3 @@ class ContinuousPPOTrainer:
                 break
 
         return loss.item()
-
-class PathwisePPOTrainer(ContinuousPPOTrainer):
-    def __init__(self, model, env, config, lambda_pathwise=0.1):
-        super().__init__(model, env, config)
-        self.lambda_pathwise = lambda_pathwise
-        # Upgrade buffer to the Meta version
-        self.buffer = MetaTrajectoryBuffer(env.num_envs, env.max_steps, config.input_dim, env.device)
-
-    def collect_rollouts(self):
-        # 1. Standard Collection
-        last_val = super().collect_rollouts()
-
-        # 2. Store Hidden Env Params (Critical for re-evaluation)
-        # We capture the *current* state of the vectorized environment
-        self.buffer.store_env_params(self.env.freq, self.env.phase)
-
-        return last_val
-
-    def train_step(self):
-        last_val = self.collect_rollouts()
-        dataloader = self.buffer.get_loader_with_params(last_val, batch_size=self.batch_size)
-
-        loss_avg = 0.0
-
-        for ppo_step in range(self.ppo_steps):
-            for batch in dataloader:
-                # Unpack (Note the extra freq/phase tensors)
-                b_obs, b_acts, b_old_logprobs, b_returns, b_advs, b_old_values, b_freqs, b_phases = batch
-
-                # Normalize Advantages
-                b_advs = (b_advs - b_advs.mean()) / (b_advs.std() + 1e-8)
-
-                # --- 1. Forward Pass (Transformer) ---
-                actor_params, values, _ = self.model(x_raw=b_obs)
-
-                # --- 2. Action Distribution ---
-                dist = self.model.get_action_distribution(actor_params)
-
-                # --- 3. PPO Loss Calculation (Standard) ---
-                new_log_probs = dist.log_prob(b_acts).sum(-1)
-                entropy = dist.entropy().sum(-1)
-                ratio = (new_log_probs - b_old_logprobs).exp()
-
-                pg_loss1 = -b_advs * ratio
-                pg_loss2 = -b_advs * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                v_loss = F.mse_loss(values.squeeze(), b_returns)
-
-                # --- 4. The Pathwise "Dream" Loss (New Logic) ---
-                # Sample NEW actions from the CURRENT policy with gradients
-                # rsample() ensures differentiation flows back to actor_params
-                dream_actions = dist.rsample()
-
-                # Differentiable Evaluation
-                # We ask: "If we took this dream action in the original environment state, what is Y?"
-                # b_freqs, b_phases: (Batch, 2)
-                # dream_actions: (Batch, Seq, 2)
-                dream_y = self.env.functional_evaluate(dream_actions, b_freqs, b_phases)
-
-                # Loss: We want to MINIMIZE y.
-                pathwise_loss = dream_y.mean()
-
-                # --- 5. Combined Optimization ---
-                # We combine standard PPO stability with the "greedy" pathwise gradient
-                total_loss = pg_loss + self.vf_coef * v_loss \
-                             - self.ent_coef * entropy.mean() \
-                             + self.lambda_pathwise * pathwise_loss
-
-                self.optimizer.zero_grad()
-                total_loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                self.optimizer.step()
-
-                loss_avg += total_loss.item()
-
-        return loss_avg / (self.ppo_steps * len(dataloader))

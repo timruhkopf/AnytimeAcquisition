@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 class AUICReward:
     """Computes Area Under Incumbent Curve reward.
@@ -21,3 +22,28 @@ class AUICReward:
         # Reward is negative incumbent (minimizing Y = maximizing -Y)
         # We return the full trajectory of rewards
         return -incumbents
+
+    def plot_reward(self, obs_traj, ax):
+        """
+        Plots the raw values vs incumbent over time for a single trajectory.
+        obs_traj: (Seq, dim + 1)
+        """
+        y_vals = obs_traj[:, -1].cpu().numpy()
+        # Calculate incumbent locally for plotting
+        incumbents = np.minimum.accumulate(y_vals)
+        steps = np.arange(len(y_vals))
+
+        # Plot raw Y values (the search process)
+        ax.plot(steps, y_vals, color='gray', alpha=0.3, label='Raw Y')
+
+        # Plot the Incumbent Curve (the step function)
+        ax.step(steps, incumbents, where='post', color='blue', lw=2, label='Incumbent')
+
+        # Shade the Area Under the Incumbent Curve
+        ax.fill_between(steps, incumbents, ax.get_ylim()[0], step='post', alpha=0.1, color='blue')
+
+        ax.set_title("AUIC Progression")
+        ax.set_xlabel("Time Step")
+        ax.set_ylabel("Value (Y)")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize='small')

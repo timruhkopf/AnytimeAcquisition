@@ -26,7 +26,7 @@ class GroundTruthVolumeReward:
 
         # Volume = Area where the true function is below our best
         gaps = torch.clamp(incumbents.unsqueeze(-1) - true_y_grid, min=1e-8)
-        volumes = gaps.mean(dim=-1)  # (Seq, Batch)
+        volumes = gaps.mean(dim=-1)  # (Seq, Batch) # fixme: shouldn't it be sum of improvements as share of the total grid function sum
 
         if self.use_log:
             # Reward is the reduction in log-volume (relative improvement)

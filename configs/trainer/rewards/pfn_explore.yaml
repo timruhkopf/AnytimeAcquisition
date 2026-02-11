@@ -1,0 +1,4 @@
+_target_: src.l2o.model.rewards.pfn_exploration_reward.PFNExplorationReward
+device: ${device}
+pfn_model:
+    _target_:  src.l2o.model.rewards.pfn_exploration_reward.load_pfn_model

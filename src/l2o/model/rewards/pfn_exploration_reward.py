@@ -6,8 +6,55 @@ def sobol_monitor_generator(n, dimension):
     return sobol.draw(n)
 
 
+def load_pfn_model():
+    import pfns4bo
+
+    # Import fix:
+    #   File "/home/ruhkopf/PycharmProjects/AnytimeAcquisition/.venv/lib/python3.10/site-packages/torch/serialization.py", line 1549, in load
+    #     return _load(
+    #   File "/home/ruhkopf/PycharmProjects/AnytimeAcquisition/.venv/lib/python3.10/site-packages/torch/serialization.py", line 2143, in _load
+    #     result = unpickler.load()
+    #   File "/home/ruhkopf/PycharmProjects/AnytimeAcquisition/.venv/lib/python3.10/site-packages/torch/serialization.py", line 2132, in find_class
+    #     return super().find_class(mod_name, name)
+    #   File "/home/ruhkopf/.pycharm_helpers/pydev/_pydev_bundle/pydev_import_hook.py", line 21, in do_import
+    #     module = self._system_import(name, *args, **kwargs)
+    #   File "/home/ruhkopf/PycharmProjects/AnytimeAcquisition/.venv/lib/python3.10/site-packages/pfns4bo/transformer.py", line 9, in <module>
+    #     from .layer import TransformerEncoderLayer, _get_activation_fn
+    #   File "/home/ruhkopf/.pycharm_helpers/pydev/_pydev_bundle/pydev_import_hook.py", line 21, in do_import
+    #     module = self._system_import(name, *args, **kwargs)
+    #   File "/home/ruhkopf/PycharmProjects/AnytimeAcquisition/.venv/lib/python3.10/site-packages/pfns4bo/layer.py", line 5, in <module>
+    #     from torch.nn.modules.transformer import _get_activation_fn, Module, Tensor, Optional, MultiheadAttention, Linear, Dropout, LayerNorm
+    # ImportError: cannot import name 'Optional' from 'torch.nn.modules.transformer' (/home/ruhkopf/PycharmProjects/AnytimeAcquisition/.venv/lib/python3.10/site-packages/torch/nn/modules/transformer.py)
+
+    import torch.nn.modules.transformer
+    import typing
+    import torch
+
+    # Manually inject the missing names into the module pfns4bo is looking at
+    torch.nn.modules.transformer.Optional = typing.Optional
+    torch.nn.modules.transformer.Tensor = torch.Tensor
+
+    # Now we can load the model without import errors
+    return torch.load(pfns4bo.bnn_model, weights_only=False)
+
+
 class PFNExplorationReward:
-    def __init__(self, pfn_model, device, monitor_sampler=None):
+    """
+    Core idea: Use the PFN under the current horizon to predict the current ppd estimate of test points
+    (incl. e.g. Sobol anchor points). Doing so under varying horizons allows us to compute the
+    information gain / variance reduction. Weighing the variance reduction by the quantile of the actual value for that location
+    incentives targeted exploration over mere coverage. It also considers the current state of optimization, so
+    the optimal action depends on the current horizon.
+
+        Implementation Ideas:
+        1. Use padding to batch parallelize the varying  with a fixed test set on the monitor points.
+        This will however blow up the batch by T x T items The padding will require the compute only to be masked.
+        Meaning this is computationally heavy, while factually still correct.
+        TODO 2. Alternatively, We can do T key-value cached forward passes, that cache the training set up to the current horizon.
+         Meaning, that the main computational cost lies in the T forward passes and the M monitor points
+    """
+
+    def __init__(self, pfn_model, device, monitor_sampler=None, **kwargs):
         self.pfn = pfn_model.to(device)
         self.pfn.eval()
 
@@ -17,21 +64,37 @@ class PFNExplorationReward:
         self.sample_monitor_points = monitor_sampler
         self.device = device
 
-    def __call__(self, obs_traj, env):
+        self.env = None  # will be set externally on trainer init
+
+    def __call__(self, obs_traj):
+        B, T, D = obs_traj.shape
+
         # 1. Concern: Global Information Query
         # Sample monitor points once per rollout call
-        mon_x = self.sample_monitor_points().to(self.device)  # (M, 2)
-        mon_y = env.functional_evaluate(mon_x, env.freq, env.phase)  # (Batch, M, 1)
+        test_x = self.sample_monitor_points().to(self.device)  # (M, 2)
+        test_x = test_x.unsqueeze(1).repeat(1, B, 1)
+        test_y = self.env.evaluate(test_x)  # (Batch, M, 1)
 
-        # 2. Concern: Triangular Batch Construction
-        # We transform (Seq, Batch, Dim) -> (Seq * Batch, Seq + M, Dim)
-        pfn_input_x, pfn_input_y, eval_pos = self._create_triangular_batch(obs_traj, mon_x)
+        # permute to meet obs_traj (B, T, D) format
+        # fixme: check that the PFN expects (Batch, Seq_Len, Dim) format and not (Seq_Len, Batch, Dim) - this is a common source of bugs
+        test_x = test_x.permute(1, 0, 2)  # (num_envs, M, 2)
+        test_y = test_y.permute(1, 0, 2)  # (num_envs, M, 1)
+
+        x_train = obs_traj.permute(1, 0, 2)  # (T, B, D)
 
         # 3. Concern: Batched Inference
         # pfn_bnn expects (Batch, Total_Len, Dim)
         with torch.no_grad():
             # The PFN predicts for everything after eval_pos (the monitor points)
-            output = self.pfn((pfn_input_x, pfn_input_y), single_eval_pos=eval_pos)
+            output = self.pfn(
+                (
+                    x_train,  # TODO (1, B, D) in KV-caching
+                    x_test, # Consider make it possible to split the x_test? maybe overly complicated changes in the PFN?
+                    y_train # TODO only (1, B) is needed in kv-caching
+                ),
+                single_eval_pos=eval_pos, # TODO check how this interacts with kv-caching
+
+            )
 
             # Compute NLL of the monitor points given the varying horizons
             # target_y must be repeated to match the Seq * Batch expansion
@@ -47,116 +110,3 @@ class PFNExplorationReward:
         # Pad first step with zero or a constant novelty
         first_step_gain = torch.zeros(1, obs_traj.size(1), device=self.device)
         return torch.cat([first_step_gain, info_gain], dim=0)
-
-    # TODO: this might be a more efficient version :
-
-    # def __call__(self, obs_traj, env):
-    #         T, B, _ = obs_traj.shape
-    #         mon_x = self.sample_monitor_points().to(self.device) # (M, 2)
-    #         M = mon_x.size(0)
-    #
-    #         # 1. Ground Truth Eval (Once per env)
-    #         mon_y = env.functional_evaluate(mon_x, env.freq, env.phase) # (B, M, 1)
-    #
-    #         # 2. Sequence Construction
-    #         # We expand the batch to (T * B) to represent every horizon
-    #         # But we use VIEWS to keep memory low.
-    #         x_history = obs_traj[..., :2].permute(1, 0, 2) # (B, T, 2)
-    #         y_history = obs_traj[..., 2:].permute(1, 0, 2) # (B, T, 1)
-    #
-    #         # Repeat history and monitor points for the "Horizon Batch"
-    #         # full_x shape: (B * T, T + M, 2)
-    #         full_x_hist = x_history.repeat_interleave(T, dim=0)
-    #         full_y_hist = y_history.repeat_interleave(T, dim=0)
-    #         full_x_mon = mon_x.unsqueeze(0).repeat(B * T, 1, 1)
-    #
-    #         full_x = torch.cat([full_x_hist, full_x_mon], dim=1)
-    #
-    #         # 3. Concern: The Horizon Mask
-    #         # This is the "logic" the model is missing.
-    #         # For each batch element 'i' in T, we mask history points > i.
-    #         mask = self._create_horizon_mask(T, M, B).to(self.device)
-    #
-    #         with torch.no_grad():
-    #             # Pass the mask into the PFN.
-    #             # Note: This assumes your PFN forward accepts an 'attn_mask'
-    #             # or a 'key_padding_mask' argument.
-    #             logits = self.pfn(
-    #                 (full_x, full_y_hist),
-    #                 single_eval_pos=T,
-    #                 attn_mask=mask
-    #             )
-    #
-    #             # 4. Score the Monitor Points
-    #             # logits: (B*T, M, Num_Classes)
-    #             target_y = mon_y.repeat_interleave(T, dim=0) # (B*T, M, 1)
-    #             nll = self.pfn.criterion(logits, target_y) # (B*T,)
-    #
-    #         # 5. Reshape and compute Delta
-    #         nll = nll.view(B, T).permute(1, 0) # (T, B)
-    #         info_gain = nll[:-1] - nll[1:]
-    #         return torch.cat([torch.zeros(1, B, device=self.device), info_gain], dim=0) * self.weight
-    #
-    #     def _create_horizon_mask(self, T, M, B):
-    #         """
-    #         Creates a mask of shape (B*T, T+M, T+M)
-    #         For a batch representing horizon 'h', points in history > h are masked.
-    #         Monitor points (T:T+M) can see history (0:h) but NOT history (h:T).
-    #         """
-    #         # Create a single T x T causal mask for history
-    #         history_mask = torch.tril(torch.ones(T, T))
-    #
-    #         # Create the mask for one set of horizons (T, T+M, T+M)
-    #         full_mask = torch.zeros(T, T + M, T + M)
-    #
-    #         for h in range(T):
-    #             # History part: horizon 'h' sees history up to 'h'
-    #             full_mask[h, :T, :T] = history_mask[h].unsqueeze(0) * history_mask
-    #
-    #             # Monitor part: monitor points see history up to 'h'
-    #             full_mask[h, T:, :h+1] = 1.0
-    #
-    #         # Convert to boolean mask (False means masked for many Transformer impls)
-    #         # or additive mask (large negative)
-    #         return full_mask.repeat(B, 1, 1) == 0
-
-    def _create_triangular_batch(self, obs_traj, mon_x):
-        T, B, _ = obs_traj.shape
-        M = mon_x.size(0)
-
-        # Repeat the trajectory T times to create horizons
-        # We want a batch where:
-        # Batch 0 has 1 point, Batch 1 has 2 points...
-        x_raw = obs_traj[..., :2]  # (T, B, 2)
-        y_raw = obs_traj[..., 2:]  # (T, B, 1)
-
-        # Expand to (T, T, B, Dim) then flatten to (T*B, T, Dim)
-        x_expanded = x_raw.unsqueeze(0).expand(T, -1, -1, -1)
-        y_expanded = y_raw.unsqueeze(0).expand(T, -1, -1, -1)
-
-        # Apply triangular mask to history
-        # For horizon 'h', we only keep points 0...h
-        mask = torch.tril(torch.ones(T, T, device=self.device)).view(T, T, 1, 1)
-        x_masked = x_expanded * mask
-        y_masked = y_expanded * mask
-
-        # Concatenate monitor points to every horizon
-        # x_masked is (T, T, B, 2), mon_x is (M, 2)
-        mon_x_expanded = mon_x.view(1, 1, M, 2).expand(T, T, B, -1)
-        # FIXME: this is unused !
-        # Note: PFNs usually take x_train and x_test concatenated
-        # We only pass Y for the train part
-
-        # Reshape to (T*B, T+M, 2) for PFN
-        # This is the "Triangular Matrix" concern
-        final_x = torch.cat([
-            x_masked.permute(0, 2, 1, 3),
-            mon_x.view(1, 1, M, 2).expand(T, B, -1, -1)
-        ],
-            dim=2
-        )
-        final_x = final_x.reshape(T * B, T + M, 2)
-
-        final_y = y_masked.permute(0, 2, 1, 3).reshape(T * B, T, 1)
-
-        return final_x, final_y, T  # eval_pos is at the end of history
