@@ -72,43 +72,45 @@ class CallbackHandler:
     def __init__(self, callbacks, trainer):
         self.callbacks = callbacks
         self.trainer = trainer
+
+        for cb in self.callbacks:
+            # Initialize the trainer on the callback
+            cb.set_trainer(self.trainer)
+
         # Pre-build the cache: { 'on_batch_end': [method1, method2], ... }
         self._method_cache = self._build_cache()
 
-    def _is_functional(self, method):
-        """Checks if a method actually contains logic (more than just 'pass')."""
-        if not method or not callable(method):
-            return False
 
-        code = getattr(method, "__code__", None)
-        if not code:
-            return True  # Keep C-extensions or built-ins
-
-        # Bytecode > 4 bytes filters out 'pass' and 'return None'
-        return len(code.co_code) > 4
 
     def _build_cache(self):
-        """Scans all callbacks once to map implemented events."""
+        """Scans all callbacks once to map implemented events by comparing method objects."""
 
-        # find all methods from AbstractCallback
-        all_events = {func for func in dir(AbstractCallback) if
-                      callable(getattr(AbstractCallback, func)) and not func.startswith("_")}
-        all_events.remove("set_trainer")
+        # 1. Identify all valid event methods from the base class
+        # We filter for public methods that don't start with '_' or 'set_trainer'
+        all_events = [
+            method_name for method_name in dir(AbstractCallback)
+            if callable(getattr(AbstractCallback, method_name))
+               and not method_name.startswith("_")
+               and method_name != "set_trainer"
+        ]
 
         cache = {}
         for cb in self.callbacks:
-            # 1. Initialize the trainer on the callback
-            cb.set_trainer(self.trainer)
 
+            for event_name in all_events:
+                # Get the method from the current callback instance
+                cb_method = getattr(cb, event_name)
+                # Get the base method from the Abstract class
+                base_method = getattr(AbstractCallback, event_name)
 
-            # 2. Find all public methods (excluding dunder methods)
-            for attr_name in set(dir(cb)).intersection(all_events):
+                # SAFER CHECK:
+                # If the function objects are different, it means the subclass
+                # provided its own implementation.
+                if cb_method.__func__ is not base_method:
+                    if event_name not in cache:
+                        cache[event_name] = []
+                    cache[event_name].append(cb_method)
 
-                method = getattr(cb, attr_name)
-                if self._is_functional(method):
-                    if attr_name not in cache:
-                        cache[attr_name] = []
-                    cache[attr_name].append(method)
         return cache
 
     def on_event(self, event_name: str, *args, **kwargs):

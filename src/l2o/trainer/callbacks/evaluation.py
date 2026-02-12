@@ -23,7 +23,8 @@ class ValidationCallback(AbstractCallback):
             fig, axes = plt.subplots(
                 nrows=3 if not isinstance(self.trainer.reward_manager, AUICReward) else 2,
                 ncols=self.num_to_plot,
-                figsize=(5 * self.num_to_plot, 10)
+                figsize=(5 * self.num_to_plot, 10),
+                sharey='row'
             )
 
             # Handle indexing for single column cases
@@ -34,24 +35,21 @@ class ValidationCallback(AbstractCallback):
                 traj_axes = axes[0]
                 reward_axes = axes[1]
 
-
             # 2. Delegate Spatial Drawing to Env
             self.env.plot_trajectories(traj["obs"], traj_axes)
 
             # 3. Delegate Reward Drawing to Reward Manager
-            for i in range(self.num_to_plot):
-                # Pass single trajectory: (Seq, Dim)
-                self.trainer.reward_manager.plot_reward(traj["obs"][i], reward_axes[i])
-
+            # FIXME: hot-fix
+            env = self.trainer.reward_manager.env   # Ensure reward manager has same env state
+            self.trainer.reward_manager.env = self.env
+            self.trainer.reward_manager.plot_reward(traj["obs"], reward_axes)
+            self.trainer.reward_manager.env = env # restore original env to avoid side effects
 
             if not isinstance(self.trainer.reward_manager, AUICReward):
                 auic_axes = axes[2]
                 for i in range(self.num_to_plot):
                     # Pass single trajectory: (Seq, Dim)
-                    AUICReward.plot_auic(traj["obs"][i], auic_axes[i])
-
-
-
+                    AUICReward().plot_reward(traj["obs"][i], auic_axes[i])
 
             plt.tight_layout()
             plt.show()

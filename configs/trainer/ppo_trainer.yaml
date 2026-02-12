@@ -21,13 +21,19 @@ trainer_class:
   ent_coef: 0.01
   vf_coef: 0.5
   max_grad_norm: 0.5
-  ppo_steps: 4
-  mini_batch_size: 64
+  ppo_epochs: 1 # number of epochs over the collected rollouts in the buffer.
+  mini_batch_size: 64 # number of samples from the buffer per batch in one PPO step
 
   callbacks:
+    - _target_: src.l2o.trainer.callbacks.mlflow.MLflowCallback
+      experiment_name: ${experiment_name}
+      run_name: ${run_name}
+      mlflow_tracking_uri: Null
+      log_system_metrics: False
+
     - _target_: src.l2o.trainer.callbacks.evaluation.ValidationCallback
       env:
         _target_: src.l2o.environment.sinusoid.VectorizedSinusoidEnv
-        num_envs: 100
+        num_envs: 256
         max_steps: 50
         device: ${device}

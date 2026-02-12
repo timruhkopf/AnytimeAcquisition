@@ -19,14 +19,13 @@ from transformers import (
 # ==========================================
 
 
-
 class L2OPolicy(nn.Module):
     """
     Wraps a HF Transformer backbone.
     Bypasses the Embedding layer to input continuous vectors directly.
     """
 
-    def __init__(self, input_dim, d_model, n_layer, n_head, max_len, pe_type):
+    def __init__(self, input_dim, d_model, n_layer, n_head, max_len, pe_type, clamp_beta=100.0):
         """
 
         :param input_dim: The dimensionality of the continuous input (e.g. 3 for (x1, x2, y))
@@ -43,7 +42,7 @@ class L2OPolicy(nn.Module):
         self.n_head = n_head
         self.max_len = max_len
         self.pe_type = pe_type
-
+        self.clamp_beta = clamp_beta
 
         # 1. Input Projection (Continuous -> d_model)
         self.input_proj = nn.Linear(input_dim, d_model)
@@ -79,7 +78,12 @@ class L2OPolicy(nn.Module):
         # Critic: Outputs scalar value
         self.critic_head = nn.Sequential(
             nn.Linear(d_model, d_model),
-            nn.Tanh(),
+            nn.GELU(),
+            # Critical Check: Why Tanh? In PPO, the Critic needs to predict the "Return" ($G_t$).
+            # If your rewards are sparse (0 or 1), Tanh is fine.The Risk: If your returns are large
+            # (e.g., a path-finding reward of +50.0), a Tanh hidden layer can sometimes lead to
+            # "dead neurons" early in training if the weights aren't initialized perfectly for the
+            # scale of the inputs.
             nn.Linear(d_model, 1)
         )
 
@@ -98,6 +102,23 @@ class L2OPolicy(nn.Module):
             assert x_raw is not None, "Must provide x_raw if inputs_embeds is None"
             inputs_embeds = self.input_proj(x_raw)
 
+            # 2. Add Positional Embeddings (ONLY for Absolute PE / GPT-2)
+            if isinstance(self.backbone, GPT2Model):
+                # Notice, that GPT-2 in a forward would expect input_ids and would internally create position_ids
+                # based on the sequence length. Since we use inputs_embeds directly, we bypass that internal logic
+                # and need to create position_ids ourselves. This is not necessary for RoPE-based models like Llama,
+                # which compute positional information dynamically in the attention mechanism itself!.
+                batch_size, seq_length = x_raw.shape[:2]
+                device = x_raw.device
+
+                # Create position ids (0, 1, 2... T-1)
+                position_ids = torch.arange(seq_length, dtype=torch.long, device=device)
+                position_ids = position_ids.unsqueeze(0).expand(batch_size, seq_length)
+
+                # Get embeddings from the backbone's internal storage
+                position_embeds = self.backbone.wpe(position_ids)
+                inputs_embeds = inputs_embeds + position_embeds
+
         # 2. Pass through Backbone
         # Note: We pass inputs_embeds directly, bypassing the backbone's internal discrete embedding layer
         outputs = self.backbone(
@@ -111,7 +132,9 @@ class L2OPolicy(nn.Module):
 
         # 3. Heads
         # Softplus + 1.0 to ensure Alpha/Beta > 1.0 (Unimodal distribution)
-        actor_params = F.softplus(self.actor_head(hidden_states)) + 1.0
+        # This softplus is a duplicate to the one in get_action_distribution!
+        # actor_params = F.softplus(self.actor_head(hidden_states)) + 1.0
+        actor_params = self.actor_head(hidden_states)
         values = self.critic_head(hidden_states)
 
         return actor_params, values, new_past_key_values
@@ -123,12 +146,18 @@ class L2OPolicy(nn.Module):
         # Without this, the agent might 'collapse' to the edges (0 or 1) too early.
         alpha = F.softplus(actor_params[..., :2]) + 1.01
         beta = F.softplus(actor_params[..., 2:]) + 1.01
+
+        # CLAMPING: Prevent the distribution from becoming too 'sharp'
+        # This prevents NaN gradients and 'frozen' policies
+        alpha = torch.clamp(alpha, max=self.clamp_beta)
+        beta = torch.clamp(beta, max=self.clamp_beta)
+
         return Beta(alpha, beta)
 
     @torch.no_grad()
     def _run_vectorized_episode(self, env):
         """Handles interaction with the vectorized environment  and KV-caching."""
-        d = env.device # fixme: to self.backbone.device?
+        d = env.device  # fixme: to self.backbone.device?
         num_envs = env.num_envs
         max_steps = env.max_steps
 
@@ -173,4 +202,3 @@ class L2OPolicy(nn.Module):
         _, last_val, _ = self.forward(x_raw=curr_input, past_key_values=past_key_values)
 
         return traj, seeds, last_val.squeeze()
-

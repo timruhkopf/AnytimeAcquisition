@@ -2,7 +2,7 @@ import mlflow
 import os
 
 from typing import Dict
-from l2o.trainer.callbacks.abstract import AbstractCallback
+from src.l2o.trainer.callbacks.abstract import AbstractCallback
 import subprocess
 
 import logging
@@ -65,9 +65,9 @@ class MLflowCallback(AbstractCallback):
         if self.trainer.config is not None:
             mlflow.log_dict(self.trainer.config, "config.yaml")
 
-    def log_on_epoch_end(self, epoch: int, metrics: Dict[str, float], **kwargs):
+    def log_on_epoch_end(self, metrics: Dict[str, float], **kwargs):
         # Log metrics to MLflow
-        mlflow.log_metrics(metrics, step=epoch)
+        mlflow.log_metrics(metrics, step= self.epoch)
 
     def log_on_train_end(self, **kwargs):
         if mlflow.active_run():

@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+import numpy as np
 
 from src.l2o.trainer.callbacks.abstract import CallbackHandler
 
@@ -31,7 +32,21 @@ class ContinuousPPOTrainer:
 
         # FIXME: pass the optimizer externally to allow for more flexibility (e.g. different learning rates for different parameter groups)
         # Consider a scheduler as well, but for now we can just use a fixed learning rate.
-        self.optimizer = optim.AdamW(policy.parameters(), lr=kwargs.get("learning_rate", 1e-5), eps=1e-8)
+        # self.optimizer = optim.AdamW(policy.parameters(), lr=kwargs.get("learning_rate", 1e-5), eps=1e-8)
+
+        # FIXME: this is model specific!
+        # Separate parameters into groups
+        backbone_params = self.policy.backbone.parameters()
+        # Combine head parameters
+        head_params = list(self.policy.actor_head.parameters()) \
+                      + list(self.policy.critic_head.parameters()) \
+                      + list(self.policy.input_proj.parameters())
+
+        # Define the optimizer with per-group learning rates
+        self.optimizer = optim.AdamW([
+            {'params': backbone_params, 'lr': kwargs.get("lr_backbone", 1e-6)},  # Very conservative
+            {'params': head_params, 'lr': kwargs.get("lr_heads", 1e-4)}  # More aggressive
+        ], eps=1e-8)
 
         # Note: Small Learning Rate for Transformers
         # LLM-based policies are sensitive. We use 5e-6 to 1e-5.
@@ -43,10 +58,13 @@ class ContinuousPPOTrainer:
         self.ent_coef = kwargs.get("ent_coef", 0.01)
         self.vf_coef = kwargs.get("vf_coef", 0.5)
         self.max_grad_norm = kwargs.get("max_grad_norm", 0.5)
-        self.ppo_steps = kwargs.get("ppo_epochs", 4)
-        self.batch_size = kwargs.get("batch_size", 64)  # Rollouts per batch
+        self.ppo_epochs = kwargs.get("ppo_epochs", 1)  # number of times to loop over all buffered data
+        self.ppo_steps = kwargs.get("ppo_steps",
+                                    4)  # number of minibatches to collect from teh buffer (total episodes collected = batch_size * ppo_steps)
+        self.batch_size = kwargs.get("batch_size", 64)  # Rollouts per batch and train the transformer with.
 
         self.epoch = 0
+        self.global_step = 0
 
         self.callbacks = callbacks or []
         # TODO callbackhandler will need to be ddp rank aware to avoid multiple logging
@@ -60,7 +78,6 @@ class ContinuousPPOTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
 
-
     def train(self, total_iterations):
 
         self.callback_handler.on_event('on_train_start')
@@ -70,8 +87,9 @@ class ContinuousPPOTrainer:
             if self.stop_training:
                 print("Training stopped early.")
                 break
-            loss = self.train_step()
-            description = f"Epoch {epoch + 1} | Loss: {loss:.4f}"
+
+            self.train_step()
+            description = f"Epoch {epoch + 1}"  # | Loss: {loss:.4f}"
             progress_bar.set_description(description)
 
         self.callback_handler.on_event('log_on_train_end')
@@ -112,12 +130,15 @@ class ContinuousPPOTrainer:
             # all_last_values contains the Critic’s prediction of the Expected Future Value beyond the last step.
             # By adding this to our GAE calculation, we tell the model: "Even though the episode ended here, this is
             # how much more reward we probably would have gotten."
-            # FIXME: make all_last values the final regret?
+            # Consider Risk: Reward_manager is a neural network it is efficient to batch calculate the rewards.
+            #  However, ensure the shape matches the requirements for GAE.
+            #  If you give a single scalar reward for a sequence, you must decide:
+            #  do you assign it to the last token (standard RLHF) or smear it across all tokens?
+            #  If smeared: You lose temporal credit assignment.
+            #  If last token: GAE handles the propagation backward. This is usually preferred.
             all_last_values[start_idx:end_idx] = last_vals
 
-
         return all_last_values
-
 
     def train_step(self):
         # 1. Collect Data
@@ -128,15 +149,16 @@ class ContinuousPPOTrainer:
         )
         self.callback_handler.on_event("on_rollout_end", last_val=last_val)
 
-        # 2. Compute Advantages
-        dataloader = self.buffer.get_loader(last_val, batch_size=self.batch_size)
-
         # 3. PPO Optimization Loop
-        for ppo_step in range(self.ppo_steps):
+        epoch_metrics = []
+        for ppo_step in range(self.ppo_epochs):
+
+            dataloader = self.buffer.get_loader(last_val, batch_size=self.batch_size)
 
             self.callback_handler.on_event("on_policy_epoch_start", epoch=self.epoch, ppo_step=ppo_step)
 
             losses = []
+            batch_metrics = []
             for batch in dataloader:
                 b_obs, b_acts, b_old_logprobs, b_returns, b_advs, b_old_values = batch
 
@@ -144,13 +166,17 @@ class ContinuousPPOTrainer:
                 # We normalize advantages at the mini-batch level. This ensures
                 # that the gradient updates have a mean of 0, preventing the
                 # Transformer from developing a global bias toward specific x-coordinates.
+                # CONSIDER: Normalize advantages over the entire rollout buffer once, before splitting into minibatches.
+                #  We are normalizing inside the minibatch loop.
+                #  Risk: If our batch size is small (e.g., 64 sequences) and rewards are sparse,
+                #  the mean/std of a single minibatch might not represent the true distribution.
+                #  This introduces noise.
                 b_advs = (b_advs - b_advs.mean()) / (b_advs.std() + 1e-8)
 
                 # --- Forward Pass on Full Sequences ---
                 # We pass the full sequence (Batch, Time, 3) to the model.
                 # The model will re-compute the causal mask internally.
                 # No KV-cache needed here (we want gradients for everything).
-
                 actor_params, values, _ = self.policy(x_raw=b_obs)
 
                 # Re-evaluate distribution
@@ -182,6 +208,10 @@ class ContinuousPPOTrainer:
                 v_clipped = b_old_values + torch.clamp(values.squeeze() - b_old_values, -0.2, 0.2)
                 v_loss_clipped = (v_clipped - b_returns) ** 2
                 v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                # Consider: Note: If your Value scale is very different from your Reward scale
+                #  (e.g., rewards are 0-100, values are 0-100), 0.2 clipping might be too tight or too loose.
+                #  Suggestion: Ensure your rewards are normalized or scaled to be roughly unit variance,
+                #  OR tune the clipping parameter.
 
                 # v_loss = F.mse_loss(values.squeeze(), b_returns)
 
@@ -189,22 +219,47 @@ class ContinuousPPOTrainer:
                 entropy_loss = -entropy.mean()
 
                 # Total Loss
+                # TODO uneven episodes will need a mask for padding in the loss calculation
                 loss = pg_loss + self.vf_coef * v_loss + self.ent_coef * entropy_loss
                 losses.append(loss.item())
 
                 self.optimizer.zero_grad()
                 loss.backward()
 
+                # 1. Calculate diagnostics (No Grad)
+                with torch.no_grad():
+                    # Approx KL and Clip Fraction are the most important
+                    approx_kl = 0.5 * ((ratio - 1) ** 2).mean()
+                    clip_frac = (abs(ratio - 1) > self.clip_coef).float().mean()
+
+                    batch_metrics.append({
+                        "loss/policy": pg_loss.item(),
+                        "loss/value": v_loss.item(),
+                        "loss/opt": loss.item(),
+                        "policy/approx_kl": approx_kl.item(),
+                        "policy/clip_frac": clip_frac.item(),
+                    })
+
                 self.callback_handler.on_event("on_policy_clipping", epoch=self.epoch, policy_step=ppo_step)
 
                 nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.optimizer.step()
+                self.global_step += 1
 
-            losses = torch.tensor(losses).mean().item()
-            self.callback_handler.on_event("on_policy_epoch_end", losses=losses)
+            # Average batch metrics for the PPO epoch
+            avg_ppo_metrics = {k: np.mean([m[k] for m in batch_metrics]) for k in batch_metrics[0].keys()}
+            epoch_metrics.append(avg_ppo_metrics)
 
+            # losses = torch.tensor(losses).mean().item()
+            # self.callback_handler.on_event("on_policy_epoch_end", metrics=avg_ppo_metrics)
+
+            # Send to MLflow via CallbackHandler
+            self.callback_handler.on_event("log_on_epoch_end", metrics=avg_ppo_metrics)
             if self.stop_training:
                 # can be accessed from the callbacks!
                 break
 
-        return loss.item()
+        # 3. Final average across all PPO steps to log once per train_step
+        final_metrics = {k: np.mean([m[k] for m in epoch_metrics]) for k in epoch_metrics[0].keys()}
+
+        return final_metrics

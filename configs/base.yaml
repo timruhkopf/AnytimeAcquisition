@@ -8,6 +8,9 @@ defaults:
 
 seed: 0
 
+experiment_name: debug # ???
+run_name: Null # ???
+
 # change dir
 hydra:
   job:

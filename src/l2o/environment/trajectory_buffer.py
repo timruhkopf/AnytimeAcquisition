@@ -46,12 +46,11 @@ class CumulativeEpisodeBuffer:
 
         self.episode_ptr = end_ptr
 
-
-    def get_loader(self, last_values, batch_size, gamma=0.99, gae_lambda=0.95):
-        """Calculates GAE and yields mini-batches of full sequences."""
-        # last_values: (num_episodes_in_buffer,) - the bootstrapped value for each sequence
-        # Fixme: should last_values be the final regret in the env?
-        #  Or the value predicted by the model for the final state?
+    def compute_gae(self, last_values, gamma=0.99, gae_lambda=0.95):
+        """
+        Computes GAE and Returns based on stored buffer data.
+        # FIXME: this should probably best be situated in the trainer since it is part of the training loop
+        """
         advantages = torch.zeros_like(self.rewards)
         last_gae_lam = 0
 
@@ -61,23 +60,34 @@ class CumulativeEpisodeBuffer:
             else:
                 next_values = self.values[:, t + 1]
 
-            # Standard GAE formula
+            # TD Error (delta)
             delta = self.rewards[:, t] + gamma * next_values * (1 - self.dones[:, t]) - self.values[:, t]
-            advantages[:, t] = last_gae_lam = delta + gamma * gae_lambda * (1 - self.dones[:, t]) * last_gae_lam
+
+            # Recursive GAE calculation
+            last_gae_lam = delta + gamma * gae_lambda * (1 - self.dones[:, t]) * last_gae_lam
+            advantages[:, t] = last_gae_lam
 
         returns = advantages + self.values
+        return advantages, returns
 
-        # Flatten envs/episodes for sampling, but keep the Time dimension (B, T, D)
+    def get_loader(self, last_values, batch_size, gamma=0.99, gae_lambda=0.95):
+        """Yields mini-batches of full sequences after computing advantages."""
+
+        # Calculate GAE using the factored method
+        advantages, returns = self.compute_gae(last_values, gamma, gae_lambda)
+
+        # Flatten/Shuffle logic
         indices = torch.randperm(self.total_episodes)
+
         for i in range(0, self.total_episodes, batch_size):
             batch_idx = indices[i: i + batch_size]
             yield (
-                self.obs[batch_idx],  # (B_size, T, 3)
-                self.acts[batch_idx],  # (B_size, T, 2)
-                self.logprobs[batch_idx],  # (B_size, T)
-                returns[batch_idx],  # (B_size, T)
-                advantages[batch_idx],  # (B_size, T)
-                self.values[batch_idx]  # (B_size, T)
+                self.obs[batch_idx],
+                self.acts[batch_idx],
+                self.logprobs[batch_idx],
+                returns[batch_idx],
+                advantages[batch_idx],
+                self.values[batch_idx]
             )
 
     def to(self, device):
