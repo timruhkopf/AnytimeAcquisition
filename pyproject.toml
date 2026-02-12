@@ -1,0 +1,16 @@
+[project]
+name = "anytimeacquisition"
+version = "0.2.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "hydra-core>=1.3.2",
+    "mlflow>=3.9.0",
+    "numpy>=2.2.6",
+    "pfns4bo>=0.1.5",
+    "pytest>=9.0.2",
+    "submitit>=1.5.4",
+    "torch>=2.10.0",
+    "transformers>=5.1.0",
+]
