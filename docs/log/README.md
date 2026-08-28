@@ -29,6 +29,7 @@ first.
 ## Index
 
 <!-- newest first — add new entries above this line -->
+- [2026-08-28 — Why pi0/pi0.5 use separate expert weights + a fine-tuned backbone, and why the ActionHead deliberately differs (frozen PFN)](2026-08-28-pi0-moe-and-frozen-vs-finetuned-backbone.md)
 - [2026-08-28 — M2: PFN transformer + bar distribution, trained checkpoints, prior/data/PFN overlay notebook](2026-08-28-m2-pfn-and-bar-distribution.md)
 - [2026-08-28 — Align BNNPrior with PFNs4BO/ifBO: noise, input scaling, sparseness, spurious dims, deeper default](2026-08-28-align-bnn-prior-with-pfns4bo-ifbo.md)
 - [2026-08-27 — PFNs4BO's own BNN prior — what they do differently from ours](2026-08-27-pfns4bo-bnn-prior-comparison.md)
