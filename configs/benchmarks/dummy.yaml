@@ -1,0 +1,2 @@
+_target_: anytimeacquisition.benchmarks.dummy.DummyBenchmark
+dim: 2

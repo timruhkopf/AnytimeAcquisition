@@ -1,0 +1,81 @@
+[project]
+name = "anytimeacquisition"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "timruhkopf", email = "timruhkopf@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "hydra-core>=1.3.5",
+    "hydra-submitit-launcher>=1.2.0",
+    "matplotlib>=3.10.9",
+    "mlflow>=3.15.2",
+    "seaborn>=0.13.2",
+    # tabpfn: commented out -- nothing in src/ actually imports it (M2 built
+    # a custom PFN, not TabPFN's own architecture; see docs/log/2026-08-27-
+    # pfns4bo-bnn-prior-comparison.md). It also independently depends on
+    # torch, unconditioned on our cpu/cu126 extras below -- that's what
+    # caused the bare-`uv sync` footgun described below. Re-add only if
+    # something actually needs it, and re-check that footgun if you do.
+]
+
+# torch is deliberately NOT in the plain dependencies list above -- which
+# build you get (CPU vs. a specific CUDA version) has to be an explicit
+# per-machine choice, not something uv can infer, so it lives here as two
+# conflicting extras instead. Pick one at sync time:
+#   uv sync --extra cpu     # local dev (this machine has no CUDA driver)
+#   uv sync --extra cu126   # CUDA cluster (Ulysses) -- VERIFY cu126 first,
+#                            # see docs/OPEN_QUESTIONS.md #7; run `nvidia-smi`
+#                            # on the cluster and change the extra name/index
+#                            # below if its driver needs a different CUDA
+#                            # version. Never verified on real GPU hardware.
+#
+# ALWAYS pass one of the two --extra flags. A bare `uv sync` does NOT fail
+# cleanly and does NOT skip torch -- verified empirically (2026-08-28, while
+# tabpfn was still an active dependency): it silently pulled the full
+# default GPU wheel (~15 bundled nvidia-* packages, multi-GB) anyway,
+# because tabpfn also depended on torch, unconditioned on either of *our*
+# extras, so it fell straight through to the unconstrained default PyPI
+# resolution instead of being redirected. tabpfn is commented out above now,
+# but the same risk applies to any future dependency that pulls torch in
+# transitively -- the extras split only protects requirement edges that
+# carry one of our extra markers.
+[project.optional-dependencies]
+cpu = ["torch>=2.13.0"]
+cu126 = ["torch>=2.13.0"]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cu126" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[project.scripts]
+aa-train = "anytimeacquisition.pipelines.train:main"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

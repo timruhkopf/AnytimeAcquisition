@@ -1,0 +1,16 @@
+# @package _global_
+# Small/fast smoke checkpoint, not a serious training run -- see
+# docs/milestones/M2.md for what a real run should actually look like.
+# Run: uv run python -m anytimeacquisition.pipelines.train_pfn experiment=pfn_smoke_xdim2
+priors:
+  x_dim: 2
+  batch_size: 32
+models:
+  surrogates:
+    d_model: 64
+    n_layers: 3
+    n_bins: 64
+trainer:
+  n_steps: 500
+  log_every: 50
+  checkpoint_path: ${hydra:runtime.cwd}/src/anytimeacquisition/pipelines/_checkpoints/pfn_smoke_xdim2.pt

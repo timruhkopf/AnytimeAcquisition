@@ -1,0 +1,9 @@
+# Cluster-specific values you'll need to fill in — see docs/OPEN_QUESTIONS.md.
+# Actual SLURM resource requests (partition, gpus, timeout) are passed to the
+# hydra-submitit-launcher plugin via CLI overrides in scripts/submit.sh
+# (hydra.launcher.*), not read from here. Nothing in this repo currently
+# reads this config group at runtime (scripts/slurm/train.sbatch just does
+# `source .venv/bin/activate`, not conda -- see docs/OPEN_QUESTIONS.md #5) --
+# kept as a placeholder for cluster-specific values if that changes.
+name: slurm
+

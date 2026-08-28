@@ -1,0 +1,20 @@
+# Top-level Hydra config for pipelines/train_pfn.py -- separate from
+# configs/config.yaml (the EXIT/policy-training composition, benchmarks +
+# priors + models/surrogates + trainer) since PFN pretraining doesn't touch
+# benchmarks or the EXIT trainer at all, it's a self-contained loop over
+# priors + the PFN itself. See docs/milestones/M2.md.
+#
+# Run a named, reproducible config via `experiment=<name>` (Hydra's
+# standard experiment-config pattern, configs/experiment/*.yaml), e.g.:
+#   uv run python -m anytimeacquisition.pipelines.train_pfn experiment=pfn_smoke_xdim2
+defaults:
+  - priors: bnn
+  - models/surrogates: pfn
+  - trainer: pfn_trainer
+  - callbacks: mlflow
+  - _self_
+  - optional experiment: null
+
+seed: 0
+device: cpu
+allow_dirty: false

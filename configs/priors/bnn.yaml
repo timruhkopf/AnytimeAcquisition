@@ -1,0 +1,38 @@
+# x_dim is a placeholder — see docs/OPEN_QUESTIONS.md #2, the medium-dim
+# target isn't pinned yet. Override via `priors.x_dim=...` until it is.
+_target_: anytimeacquisition.priors.bnn.BNNPrior
+batch_size: 64
+x_dim: 2
+# PFNs4BO/ifBO never sample below depth 8 (docs/log/) — raised the floor to
+# match, ceiling raised further for a deeper family by default.
+depth_range: [8, 32]
+width_range: [32, 128]
+# Target range for depth*log(crit) (crit = init_std**2 * width), sampled per
+# instance then used to derive init_std — see bnn.py and docs/log/. Targets
+# the compounded quantity directly so it stays robust across depth_range,
+# not just a fixed crit range that happens to work at one depth.
+log_amp_range: [8.0, 20.0]
+bias_std: 0.1
+# Aligned with PFNs4BO/ifBO's own BNN prior — see docs/log/.
+sparseness: 0.145
+preactivation_noise_std_range: [0.0003, 0.0014]
+output_noise_std_range: [0.0004, 0.0013]
+frac_relevant_features: 0.7
+
+# Train across a distribution of dimensionalities instead of one fixed
+# x_dim -- see bnn.py's constructor comment. Left off (null) deliberately
+# for now (M2 trains on a single known x_dim to keep the pipeline simple);
+# flip on before real-world benchmarks need one PFN to generalize across
+# dimensionalities. e.g. variable_dim_min: 1
+variable_dim_min: null
+
+# Fits once, cold, then cached to disk (see bnn.py) -- cost depends on the
+# whole family config above (x_dim, depth/width range, batch_size), not
+# just these three numbers; ~70s measured at this file's current x_dim=4
+# (was ~13s at x_dim=2). Time it on your own config before bumping these up
+# for a "better" fit -- see bnn.py's constructor comment and
+# configs/experiment/pfn_ulysses_real.yaml for what happens when you don't.
+ecdf_n_samples: 1000
+ecdf_n_draws: 50
+ecdf_samples_per_draw: 300
+seed: null

@@ -1,0 +1,38 @@
+# @package _global_
+# A genuinely-sized training run, meant for the CUDA cluster (Ulysses) --
+# not a smoke test like pfn_smoke_xdim1/xdim2. See docs/milestones/M2.md
+# and the "training on Ulysses" section of docs/log/ for how to actually
+# launch this.
+#
+# Sizing here is a reasonable *first real run*, not a tuned optimum --
+# PFNs4BO's own production models go considerably bigger (emsize=512,
+# nhid=1024, nlayers=12) and train far longer. Scale this up once you've
+# confirmed it converges and know your actual wall-clock budget.
+priors:
+  batch_size: 128
+  # NOT bumping the ECDF fit settings beyond priors/bnn.yaml's own defaults
+  # here -- measured first (2026-08-28): at the current family config
+  # (x_dim=4, depth up to 32, sparseness/noise/spurious-dims all active),
+  # the default 50 draws x 300/draw already costs ~70s on CPU, comparable to
+  # or better than PFNs4BO's own get_ys() sample count (docs/log/2026-08-27-pfns4bo-bnn-prior-comparison.md).
+  # An earlier version of this file bumped to 200x500 without measuring
+  # first -- that's a ~15 minute CPU-equivalent cost, confirmed by actually
+  # running it partway before killing it. It's a ONE-TIME cost (cached to
+  # disk after) and should be much faster on the GPU this experiment
+  # actually targets, but "should be faster on GPU" was exactly the
+  # unverified assumption that produced the 15-minute surprise here --
+  # don't bump these without timing it on the actual hardware first.
+models:
+  surrogates:
+    d_model: 256
+    n_heads: 8
+    n_layers: 6
+    d_ff: 512
+    n_bins: 128
+trainer:
+  n_steps: 5000
+  warmup_steps: 200
+  log_every: 100
+  mixed_precision: true  # untested on real GPU hardware -- see docs/OPEN_QUESTIONS.md #7
+  checkpoint_path: ${hydra:runtime.cwd}/src/anytimeacquisition/pipelines/_checkpoints/pfn_ulysses_real.pt
+device: cuda

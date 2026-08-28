@@ -1,0 +1,9 @@
+# x_dim interpolated from priors.x_dim -- the PFN's input dim must match
+# the prior's, so it's not a separate value to keep in sync by hand.
+_target_: anytimeacquisition.models.pfn.PFN
+x_dim: ${priors.x_dim}
+d_model: 64
+n_heads: 4
+n_layers: 3
+d_ff: 128
+n_bins: 64

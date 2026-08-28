@@ -1,0 +1,11 @@
+defaults:
+  - benchmarks: dummy
+  - priors: dummy
+  - models/surrogates: dummy
+  - trainer: dummy
+  - callbacks: mlflow
+  - deployment: local
+  - _self_
+
+seed: 0
+allow_dirty: false

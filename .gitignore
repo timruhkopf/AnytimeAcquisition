@@ -174,3 +174,20 @@ cython_debug/
 .pypirc
 /ulysses
 /src/l2o_old/
+
+# Hydra run output dirs
+/outputs/
+/multirun/
+
+# MLflow local tracking dir (shared cluster path set via AA_MLFLOW_DIR instead)
+/mlruns/
+
+# SLURM job logs
+/logs/*.out
+/logs/*.err
+
+# Regenerable prior ECDF cache and demo-plot output (BNNPrior)
+_ecdf_cache/
+_demo_plots/
+_checkpoints/
+!/logs/.gitkeep

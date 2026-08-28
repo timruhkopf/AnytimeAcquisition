@@ -1,0 +1,11 @@
+# File-store backend (no DB server, no SQLite) so concurrent SLURM jobs never
+# contend on a single connection/lock. Every run gets its own run directory
+# under tracking_uri; `mlflow ui --backend-store-uri <tracking_uri>` browses
+# them afterward, no server process needs to run during training.
+#
+# On SLURM, override AA_MLFLOW_DIR to a path on shared/network storage so all
+# parallel jobs land in the same place, e.g.:
+#   AA_MLFLOW_DIR=/path/to/shared/project/mlruns
+mlflow:
+  tracking_uri: file://${oc.env:AA_MLFLOW_DIR,${hydra:runtime.cwd}/mlruns}
+  experiment_name: anytimeacquisition

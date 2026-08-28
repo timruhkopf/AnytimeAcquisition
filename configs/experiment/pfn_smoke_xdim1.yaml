@@ -1,0 +1,18 @@
+# @package _global_
+# Small/fast x_dim=1 checkpoint -- for the 1D prior/data/PFN-density overlay
+# diagnostic (plot_prior_data_and_pfn_1d), which needs x_dim=1 to be
+# visualizable as a 2D heatmap. See notebooks/pfn_prior_overlay_showcase.ipynb
+# and docs/milestones/M2.md.
+# Run: uv run python -m anytimeacquisition.pipelines.train_pfn experiment=pfn_smoke_xdim1
+priors:
+  x_dim: 1
+  batch_size: 32
+models:
+  surrogates:
+    d_model: 48
+    n_layers: 3
+    n_bins: 64
+trainer:
+  n_steps: 300
+  log_every: 50
+  checkpoint_path: ${hydra:runtime.cwd}/src/anytimeacquisition/pipelines/_checkpoints/pfn_smoke_xdim1.pt
