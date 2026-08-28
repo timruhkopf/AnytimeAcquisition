@@ -84,7 +84,7 @@ def plot_incumbent_curve(y: torch.Tensor, ax=None, minimize: bool = True):
 
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
+    torch.manual_seed(1)
     y = torch.rand(30) * (1 - torch.linspace(0, 0.9, 30)) + 0.01  # noisy-but-improving demo trajectory
 
     ax = plot_incumbent_curve(y)
