@@ -22,6 +22,17 @@ Two structural insights drive the approach:
    targets come from a single deterministic oracle per call, not multiple
    human demonstrators, so flow matching's complexity doesn't earn its place
    here).
+
+   *(Note, 2026-08-28: this framing is a simplification, not how π0/π0.5*
+   *actually work — their mechanism is a mixture-of-experts joint attention*
+   *over concatenated token streams with a shared block-mask, not literally*
+   *cross-attention into a separately-frozen KV cache, and their VLM*
+   *backbone is fine-tuned throughout training, not frozen. Freezing the*
+   *PFN here is a deliberate choice specific to this project, reasoned from*
+   *first principles rather than copied from π0.5's actual design —*
+   *`docs/log/2026-08-28-pi0-moe-and-frozen-vs-finetuned-backbone.md` has*
+   *the full argument, including what the paper does and doesn't actually*
+   *justify and the honest cost of freezing.)*
 2. **We control the prior, so we can search it directly with GD.** This
    enables Expert Iteration (EXIT) without discrete-decision MCTS. For any
    rolled-out incumbent step: if the incumbent *improved*, run gradient
