@@ -120,7 +120,7 @@ def _tiny_2d_model_and_bar_dist():
     from anytimeacquisition.models.bar_distribution import BarDistribution, uniform_bin_borders
     from anytimeacquisition.models.pfn import PFN
 
-    model = PFN(x_dim=2, d_model=16, n_heads=2, n_layers=1, d_ff=32, n_bins=16)
+    model = PFN(max_x_dim=2, d_model=16, n_heads=2, n_layers=1, d_ff=32, n_bins=16)
     bar_dist = BarDistribution(uniform_bin_borders(16))
     return model, bar_dist
 

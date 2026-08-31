@@ -1,0 +1,26 @@
+# @package _global_
+# Small/fast smoke checkpoint exercising variable x_dim end-to-end:
+# priors.variable_dim_min turns on BNNPrior's per-instance active_dim
+# (docs/log/, priors/bnn.py's constructor comment), and PFNTrainer already
+# passes that straight through as models/pfn.py's PFN.forward n_features --
+# so every training step's batch mixes episodes with real x_dim uniformly
+# sampled in [variable_dim_min, priors.x_dim] per instance, all padded up to
+# the model's max_x_dim = priors.x_dim ceiling (configs/models/surrogates/pfn.yaml).
+# Not a serious training run -- see docs/milestones/M2.md and pfn_smoke_xdim2.yaml
+# for what a real run should look like; this one is purely for exercising
+# the variable-x_dim capability, at priors.x_dim=4 so there's room for
+# active_dim to actually vary (1..4).
+# Run: uv run python -m anytimeacquisition.pipelines.train_pfn experiment=pfn_variable_xdim_smoke
+priors:
+  x_dim: 4
+  batch_size: 32
+  variable_dim_min: 1
+models:
+  surrogates:
+    d_model: 64
+    n_layers: 3
+    n_bins: 64
+trainer:
+  n_steps: 500
+  log_every: 50
+  checkpoint_path: ${aa_root:}/models/pfn_variable_xdim_smoke.pt

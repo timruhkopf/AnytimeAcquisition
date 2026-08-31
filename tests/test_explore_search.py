@@ -8,7 +8,7 @@ from anytimeacquisition.search.explore import explore_search, improvement_weight
 
 def _tiny_pfn(x_dim=1, seed=0):
     torch.manual_seed(seed)
-    pfn = PFN(x_dim=x_dim, d_model=16, n_heads=2, n_layers=2, d_ff=32, n_bins=16)
+    pfn = PFN(max_x_dim=x_dim, d_model=16, n_heads=2, n_layers=2, d_ff=32, n_bins=16)
     pfn.eval()
     bar_dist = BarDistribution(uniform_bin_borders(16))
     return pfn, bar_dist

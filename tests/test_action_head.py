@@ -6,7 +6,7 @@ from anytimeacquisition.models.pfn import PFN
 
 def _build(x_dim=2, d_model=16, n_layers=2, n_heads=2, batch_size=3, n_train=5):
     torch.manual_seed(0)
-    pfn = PFN(x_dim=x_dim, d_model=d_model, n_heads=n_heads, n_layers=n_layers, d_ff=32, n_bins=16)
+    pfn = PFN(max_x_dim=x_dim, d_model=d_model, n_heads=n_heads, n_layers=n_layers, d_ff=32, n_bins=16)
     pfn_d_model, pfn_n_layers = pfn_dims(pfn)
     action_head = ActionHead(pfn_d_model=pfn_d_model, pfn_n_layers=pfn_n_layers, x_dim=x_dim, d_model=16, n_heads=2, d_ff=32)
     x_train = torch.rand(batch_size, n_train, x_dim)

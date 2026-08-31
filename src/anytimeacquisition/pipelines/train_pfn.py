@@ -74,8 +74,8 @@ def train_pfn(
     torch.manual_seed(seed)
     prior_kwargs = prior_kwargs or {}
     prior = BNNPrior(batch_size=batch_size, x_dim=x_dim, device=device, seed=seed, **prior_kwargs)
-    model = PFN(x_dim=x_dim, d_model=d_model, n_heads=n_heads, n_layers=n_layers, d_ff=d_ff, n_bins=n_bins).to(device)
-    model_config = dict(x_dim=x_dim, d_model=d_model, n_heads=n_heads, n_layers=n_layers, d_ff=d_ff, n_bins=n_bins)
+    model = PFN(max_x_dim=x_dim, d_model=d_model, n_heads=n_heads, n_layers=n_layers, d_ff=d_ff, n_bins=n_bins).to(device)
+    model_config = dict(max_x_dim=x_dim, d_model=d_model, n_heads=n_heads, n_layers=n_layers, d_ff=d_ff, n_bins=n_bins)
 
     trainer = PFNTrainer(
         prior=prior, model=model, seed=seed, n_steps=n_steps, min_train=min_train,

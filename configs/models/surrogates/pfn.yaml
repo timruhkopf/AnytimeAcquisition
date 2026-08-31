@@ -1,7 +1,11 @@
-# x_dim interpolated from priors.x_dim -- the PFN's input dim must match
-# the prior's, so it's not a separate value to keep in sync by hand.
+# max_x_dim interpolated from priors.x_dim -- the PFN's input-embedding
+# ceiling must match the prior's own x_dim/d (its ceiling too, once
+# priors.variable_dim_min is set -- see priors/bnn.yaml), so it's not a
+# separate value to keep in sync by hand. The PFN accepts any real
+# per-episode x_dim <= max_x_dim (models/pfn.py's n_features, generalizing
+# ifBO/PFNs4BO's VariableNumFeaturesEncoder -- see that module's docstring).
 _target_: anytimeacquisition.models.pfn.PFN
-x_dim: ${priors.x_dim}
+max_x_dim: ${priors.x_dim}
 d_model: 64
 n_heads: 4
 n_layers: 3

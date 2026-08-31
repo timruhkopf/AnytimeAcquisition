@@ -207,7 +207,7 @@ if __name__ == "__main__":
     print(f"loaded PFN checkpoint: {checkpoint_path.name}, config={ckpt['config']}")
 
     d_model, n_layers = pfn_dims(pfn)
-    x_dim = ckpt["config"]["x_dim"]
+    x_dim = ckpt["config"]["max_x_dim"]
     torch.manual_seed(0)
     action_head = ActionHead(pfn_d_model=d_model, pfn_n_layers=n_layers, x_dim=x_dim)
 
