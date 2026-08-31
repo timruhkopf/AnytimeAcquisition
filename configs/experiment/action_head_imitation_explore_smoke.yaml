@@ -1,0 +1,30 @@
+# @package _global_
+# Smoke-scale marginal explore-only ActionHead behavior-cloning run --
+# learn to imitate explore_search's oracle corrections (weighted-NLL
+# objective at a fixed "interesting points" set) from a random-policy
+# rollout, no exploit branch. Small model/few rollouts, same spirit as
+# configs/experiment/pfn_smoke_*.
+#
+#   uv run python -m anytimeacquisition.pipelines.action_head_imitation \
+#     experiment=action_head_imitation_explore_smoke allow_dirty=true
+branches: [explore]
+
+trainer:
+  n_rollouts: 300
+  n_init: 5
+  n_steps: 15
+  log_every: 10
+  explore_search_kwargs:
+    n_restarts: 6
+    n_steps: 15
+
+build_interesting_points_kwargs:
+  n_sobol: 12
+  n_random: 12
+  n_basin_restarts: 6
+
+action_head:
+  d_model: 32
+  n_heads: 2
+  d_ff: 64
+  dropout: 0.0

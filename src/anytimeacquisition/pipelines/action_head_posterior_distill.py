@@ -65,7 +65,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from anytimeacquisition.deployment.provenance import record_provenance
-from anytimeacquisition.models.action_head import ActionHead, pfn_dims
+from anytimeacquisition.models.action_head import ActionHead, beta_mode, pfn_dims
 from anytimeacquisition.models.bar_distribution import BarDistribution
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.pipelines.train_pfn import load_pfn_checkpoint
@@ -115,14 +115,6 @@ def beta_nll_loss(alpha: torch.Tensor, beta: torch.Tensor, target_x: torch.Tenso
     head's per-dimension-independent Beta structure)."""
     target_x = target_x.clamp(eps, 1.0 - eps)
     return -torch.distributions.Beta(alpha, beta).log_prob(target_x).sum(dim=-1)
-
-
-def beta_mode(alpha: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
-    """alpha, beta >= 1 always holds here (ActionHead's softplus+1 clamp),
-    so the mode is always defined: (alpha-1)/(alpha+beta-2), with the
-    alpha=beta=1 (uniform) edge case mapped to 0.5."""
-    denom = alpha + beta - 2.0
-    return torch.where(denom > 1e-6, (alpha - 1.0) / denom.clamp_min(1e-6), torch.full_like(denom, 0.5))
 
 
 def run_stage(

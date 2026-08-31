@@ -1,7 +1,15 @@
 import torch
 
-from anytimeacquisition.models.action_head import AUX_FEATURE_NAMES, ActionHead, pfn_dims
+from anytimeacquisition.models.action_head import (
+    AUX_FEATURE_NAMES,
+    ActionHead,
+    action_head_policy_fn,
+    build_rollout_aux_features,
+    pfn_dims,
+)
 from anytimeacquisition.models.pfn import PFN
+from anytimeacquisition.priors.bnn import BNNPrior
+from anytimeacquisition.trainer.exit_rollout import random_policy, rollout_episode
 
 
 def _build(x_dim=2, d_model=16, n_layers=2, n_heads=2, batch_size=3, n_train=5):
@@ -57,3 +65,53 @@ def test_action_head_output_is_batch_independent():
     assert torch.allclose(out["alpha"][1:], out_pert["alpha"][1:])
     assert torch.allclose(out["beta"][1:], out_pert["beta"][1:])
     assert torch.allclose(out["value"][1:], out_pert["value"][1:])
+
+
+def test_build_rollout_aux_features_matches_expected_shapes_and_ranges():
+    torch.manual_seed(0)
+    n_init, n_steps, batch_size = 4, 10, 3
+    prior = BNNPrior(batch_size=batch_size, x_dim=2, seed=0)
+    rollout = rollout_episode(prior, n_init=n_init, n_steps=n_steps, policy_fn=random_policy)
+
+    aux0 = build_rollout_aux_features(rollout, step=0, n_steps=n_steps)
+    assert set(aux0) == set(AUX_FEATURE_NAMES)
+    assert aux0["step_count"].shape == (batch_size,)
+    assert (aux0["step_count"] == 0.0).all()
+    assert torch.allclose(aux0["remaining_budget"], torch.full((batch_size,), 1.0))
+    # No history yet (step < trend_window default of 3) -> trend is exactly 0.
+    assert (aux0["improvement_trend"] == 0.0).all()
+
+    aux_last = build_rollout_aux_features(rollout, step=n_steps - 1, n_steps=n_steps)
+    assert (aux_last["step_count"] == n_steps - 1).all()
+    assert torch.allclose(aux_last["remaining_budget"], torch.full((batch_size,), 1.0 / n_steps))
+    assert (aux_last["improvement_trend"] >= 0.0).all()  # max(0, ...) clamp
+
+
+def test_action_head_policy_fn_step_counter_advances_and_shape_is_correct():
+    x_dim, batch_size = 2, 3
+    pfn = PFN(max_x_dim=x_dim, d_model=16, n_heads=2, n_layers=2, d_ff=32, n_bins=16)
+    pfn_d_model, pfn_n_layers = pfn_dims(pfn)
+    torch.manual_seed(0)
+    action_head = ActionHead(pfn_d_model=pfn_d_model, pfn_n_layers=pfn_n_layers, x_dim=x_dim, d_model=16, n_heads=2, d_ff=32)
+
+    n_init, n_steps = 4, 6
+    prior = BNNPrior(batch_size=batch_size, x_dim=x_dim, seed=0)
+    policy_fn = action_head_policy_fn(action_head, pfn, n_steps=n_steps, sample=False)
+    rollout = rollout_episode(prior, n_init=n_init, n_steps=n_steps, policy_fn=policy_fn)
+
+    assert rollout["x_context"].shape == (batch_size, n_init + n_steps, x_dim)
+    assert (rollout["x_context"] >= 0.0).all() and (rollout["x_context"] <= 1.0).all()
+
+
+def test_action_head_policy_fn_sample_true_returns_valid_actions():
+    x_dim, batch_size = 1, 4
+    pfn = PFN(max_x_dim=x_dim, d_model=16, n_heads=2, n_layers=1, d_ff=32, n_bins=16)
+    pfn_d_model, pfn_n_layers = pfn_dims(pfn)
+    torch.manual_seed(0)
+    action_head = ActionHead(pfn_d_model=pfn_d_model, pfn_n_layers=pfn_n_layers, x_dim=x_dim, d_model=16, n_heads=2, d_ff=32)
+
+    x_train, y_train = torch.rand(batch_size, 5, x_dim), torch.rand(batch_size, 5)
+    policy_fn = action_head_policy_fn(action_head, pfn, n_steps=5, sample=True)
+    action = policy_fn(x_train, y_train, x_dim)
+    assert action.shape == (batch_size, x_dim)
+    assert (action >= 0.0).all() and (action <= 1.0).all()

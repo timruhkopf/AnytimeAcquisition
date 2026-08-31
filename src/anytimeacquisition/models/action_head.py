@@ -206,6 +206,113 @@ class ActionHead(nn.Module):
         return {"alpha": alpha, "beta": beta, "value": value}
 
 
+def beta_mode(alpha: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
+    """alpha, beta >= 1 always holds for `ActionHead`'s own output (softplus+1
+    clamp), so the mode is always defined: (alpha-1)/(alpha+beta-2), with the
+    alpha=beta=1 (uniform) edge case mapped to 0.5. Shared here (not just
+    `pipelines/action_head_posterior_distill.py`, the first caller) since
+    `action_head_policy_fn` below needs it too."""
+    denom = alpha + beta - 2.0
+    return torch.where(denom > 1e-6, (alpha - 1.0) / denom.clamp_min(1e-6), torch.full_like(denom, 0.5))
+
+
+def build_rollout_aux_features(rollout: dict, step: int, n_steps: int, trend_window: int = 3) -> dict:
+    """Real aux features off actual rollout state -- for the imitation
+    trainer (`trainer/action_head_imitation_trainer.py`), replacing
+    `pipelines/action_head_posterior_distill.py`'s toy `canonical_aux_features`
+    (which hardcodes 3 of 4 fields at canonical values) with the genuine
+    per-step quantities a trained policy should condition on.
+
+    `rollout`: as returned by `trainer.exit_rollout.rollout_episode`. Reads
+    `rollout["pre_step_contexts"][step]` (context as it stood immediately
+    before this step, matching what a policy/oracle actually conditions on
+    at that state) and, for `improvement_trend`, also `[step - trend_window]`
+    when available.
+
+    `improvement_trend = max(0, log(incumbent_{step-trend_window}) -
+    log(incumbent_step))` -- same log-improvement idiom as
+    `search.explore.improvement_weights`, applied to the realized trajectory
+    instead of a candidate set, for consistency. 0 when `step < trend_window`
+    (no history yet).
+
+    -> {name: [B] tensor} for each of AUX_FEATURE_NAMES.
+    """
+    _, y_ctx = rollout["pre_step_contexts"][step]
+    incumbent = y_ctx.min(dim=1).values  # [B]
+    B = incumbent.shape[0]
+
+    if step < trend_window:
+        improvement_trend = torch.zeros(B)
+    else:
+        _, y_prev = rollout["pre_step_contexts"][step - trend_window]
+        incumbent_prev = y_prev.min(dim=1).values
+        improvement_trend = (
+            torch.log(incumbent_prev.clamp_min(1e-12)) - torch.log(incumbent.clamp_min(1e-12))
+        ).clamp_min(0.0)
+
+    return {
+        "step_count": torch.full((B,), float(step)),
+        "remaining_budget": torch.full((B,), (n_steps - step) / n_steps),
+        "incumbent_value": incumbent,
+        "improvement_trend": improvement_trend,
+    }
+
+
+def action_head_policy_fn(action_head: "ActionHead", pfn: PFN, n_steps: int, sample: bool = False):
+    """Factory wrapping `ActionHead.forward` into the
+    `policy_fn(x_context, y_context, x_dim) -> [B, x_dim]` signature
+    `trainer.exit_rollout.rollout_episode` expects -- this glue doesn't
+    exist anywhere else. Tracks a step counter via closure state,
+    incremented once per call -- safe because `rollout_episode` calls
+    `policy_fn` exactly once per step, in order (0..n_steps-1).
+
+    Aux features are built directly from `(x_context, y_context)` at call
+    time, not via `build_rollout_aux_features` above (that needs a
+    finished rollout's full `pre_step_contexts` list, which doesn't exist
+    yet while a rollout is still being generated) -- but reproduces the
+    same quantities: `step_count` from the closure counter,
+    `remaining_budget` from `(n_steps - step) / n_steps`,
+    `incumbent_value` from `y_context` directly, and `improvement_trend`
+    from this call's own running incumbent history (the only history
+    available at call time).
+
+    `sample=False` (default -- evaluation/rollout-for-metrics): the Beta
+    distribution's mode (`beta_mode`). `sample=True`: an actual
+    `Beta(alpha, beta).sample()` draw -- kept for future DAgger-round
+    exploration, not exercised by the round-0-only trainer built here.
+    """
+    trend_window = 3
+    state = {"step": 0, "incumbent_history": []}
+
+    def policy_fn(x_context: torch.Tensor, y_context: torch.Tensor, x_dim: int) -> torch.Tensor:
+        step = state["step"]
+        incumbent = y_context.min(dim=1).values  # [B]
+        state["incumbent_history"].append(incumbent.detach())
+
+        if step < trend_window:
+            improvement_trend = torch.zeros_like(incumbent)
+        else:
+            incumbent_prev = state["incumbent_history"][step - trend_window]
+            improvement_trend = (
+                torch.log(incumbent_prev.clamp_min(1e-12)) - torch.log(incumbent.clamp_min(1e-12))
+            ).clamp_min(0.0)
+
+        aux = {
+            "step_count": torch.full_like(incumbent, float(step)),
+            "remaining_budget": torch.full_like(incumbent, (n_steps - step) / n_steps),
+            "incumbent_value": incumbent,
+            "improvement_trend": improvement_trend,
+        }
+        with torch.no_grad():
+            out = action_head(pfn, x_context, y_context, aux, blind=False)
+        state["step"] += 1
+        if sample:
+            return torch.distributions.Beta(out["alpha"], out["beta"]).sample()
+        return beta_mode(out["alpha"], out["beta"])
+
+    return policy_fn
+
+
 if __name__ == "__main__":
     from anytimeacquisition.utils.paths import CHECKPOINT_DIR
     from anytimeacquisition.pipelines.train_pfn import load_pfn_checkpoint
