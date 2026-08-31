@@ -10,6 +10,11 @@ lr: 1.0e-3
 warmup_steps: 50
 log_every: 50
 checkpoint_path: null  # set via an experiment config, or override directly
-# CUDA-only (see trainer/pfn_trainer.py docstring) -- no-ops on CPU. Untested
-# on real GPU hardware in this repo so far; validate before trusting it.
-mixed_precision: True
+# CUDA-only (see trainer/pfn_trainer.py docstring) -- no-ops on CPU, but
+# still prints a one-time "ignoring" notice there, which is just noise for
+# every CPU experiment (the common case locally). configs/train_pfn.yaml's
+# own default device is cpu, so default to False here too rather than
+# every non-GPU experiment inheriting a mismatched True; the one config
+# that actually targets CUDA (configs/experiment/pfn_ulysses_real.yaml)
+# already overrides this explicitly, so it doesn't rely on this default.
+mixed_precision: False
