@@ -29,6 +29,8 @@ trainer:
 # Per-dimension validation (docs/log/2026-08-31-variable-xdim-training-
 # stagnation.md): does NLL/eval_mse actually get worse at higher
 # dimensionality (expected), on top of whatever caused popular-pig's
-# stagnation -- callbacks/dim_validation.py, logged as val_dim{1..4}/nll
-# and val_dim{1..4}/eval_mse alongside the trainer's own train/nll, eval/mse.
+# stagnation -- callbacks/dim_validation.py, logged as nll/val_dim{1..4}
+# and mse/val_dim{1..4} alongside the trainer's own nll/train, mse/train
+# (metric-type first, so MLflow groups all nll curves together, all mse
+# curves together).
 validate_dims: [1, 2, 3, 4]
