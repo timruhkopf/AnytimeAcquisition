@@ -19,6 +19,14 @@ seed: 0
 device: cpu
 allow_dirty: false
 
+# Opt-in per-dimension validation (docs/log/2026-08-31-variable-xdim-
+# training-stagnation.md): a list of x_dim values (each <= priors.x_dim) to
+# report NLL/eval_mse against, via dedicated fixed-x_dim BNNPriors --
+# callbacks/dim_validation.py. null (default) adds no extra callbacks, the
+# ordinary case for a fixed-x_dim run; e.g. [1, 2, 3, 4] for a
+# variable_dim_min run (see configs/experiment/pfn_variable_xdim_smoke.yaml).
+validate_dims: null
+
 # Own MLflow experiment -- was sharing configs/callbacks/mlflow.yaml's bare
 # "anytimeacquisition" default with configs/config.yaml's EXIT/policy loop
 # (a different pipeline entirely -- see this file's header), same gap

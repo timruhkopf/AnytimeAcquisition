@@ -13,11 +13,9 @@ notebook/pipeline `main()` -- it needs to close over whatever it validates
 against (a specific real-benchmark instance, a specific edge case), so it
 isn't a named, swappable component the way priors/models/trainers are.
 """
-from dataclasses import dataclass
 from typing import Any, Callable
 
 
-@dataclass
 class Callback:
     """One periodic hook. `fn(step, trainer)` -> a flat {metric_name: value}
     dict (empty or None to skip logging this call, e.g. a check that only
@@ -33,11 +31,21 @@ class Callback:
     `every_n_steps` defaults to the trainer's own logging cadence (None);
     set it explicitly for a callback that should run coarser (an expensive
     real-benchmark eval) or finer than the main loop's own metrics.
+
+    Deliberately NOT a `@dataclass`: a list of these gets passed straight
+    through `hydra.utils.instantiate(cfg.trainer, ..., callbacks=callbacks)`
+    (see `pipelines/train_pfn.py`'s `main()`) as a plain extra kwarg, and
+    Hydra/OmegaConf auto-converts `dataclass`/attrs instances it finds
+    there into structured configs -- which strips real methods like
+    `maybe_run` below, breaking at the first call with a confusing
+    `ConfigAttributeError: Key 'maybe_run' not in 'Callback'`. A plain class
+    isn't OmegaConf-representable, so it passes through untouched.
     """
 
-    name: str
-    fn: Callable[[int, Any], dict | None]
-    every_n_steps: int | None = None
+    def __init__(self, name: str, fn: Callable[[int, Any], dict | None], every_n_steps: int | None = None):
+        self.name = name
+        self.fn = fn
+        self.every_n_steps = every_n_steps
 
     def maybe_run(self, step: int, trainer: Any, default_every_n_steps: int) -> dict:
         every = self.every_n_steps or default_every_n_steps

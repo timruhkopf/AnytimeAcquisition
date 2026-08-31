@@ -26,3 +26,9 @@ trainer:
   n_steps: 500
   log_every: 50
   checkpoint_path: ${aa_root:}/models/pfn_variable_xdim_smoke.pt
+# Per-dimension validation (docs/log/2026-08-31-variable-xdim-training-
+# stagnation.md): does NLL/eval_mse actually get worse at higher
+# dimensionality (expected), on top of whatever caused popular-pig's
+# stagnation -- callbacks/dim_validation.py, logged as val_dim{1..4}/nll
+# and val_dim{1..4}/eval_mse alongside the trainer's own train/nll, eval/mse.
+validate_dims: [1, 2, 3, 4]
