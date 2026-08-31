@@ -2,14 +2,14 @@
 # instantiate() time in pipelines/train_pfn.py -- not representable in YAML,
 # same pattern as trainer/dummy.yaml's benchmark/prior/surrogate.
 _target_: anytimeacquisition.trainer.pfn_trainer.PFNTrainer
-n_steps: 500
+n_steps: 100000
 min_train: 3
-max_train: 20
-n_test: 10
+max_train: 100
+n_test: 1000
 lr: 1.0e-3
 warmup_steps: 50
 log_every: 50
 checkpoint_path: null  # set via an experiment config, or override directly
 # CUDA-only (see trainer/pfn_trainer.py docstring) -- no-ops on CPU. Untested
 # on real GPU hardware in this repo so far; validate before trusting it.
-mixed_precision: false
+mixed_precision: True

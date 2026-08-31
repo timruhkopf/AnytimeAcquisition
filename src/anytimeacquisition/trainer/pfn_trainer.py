@@ -1,12 +1,17 @@
 """PFN pretraining loop (M2), as a `_target_`-instantiable trainer class --
 same shape as `trainer/dummy.py`'s `DummyTrainer`: runtime objects (prior,
-model, bar_dist) and the seed/logging hook are passed in at instantiate
-time (`instantiate(cfg.trainer, prior=prior, model=model, bar_dist=bar_dist,
-seed=cfg.seed)`), everything else is a plain config-driven hyperparameter on
-`self`. `run()` takes no arguments. This replaces an earlier version that
-threaded every hyperparameter through a `_train_loop(...)` helper function
-with a matching call in `main()` that manually unpacked `cfg.xxx` for each
-one -- pure duplication of the config schema, not an abstraction over it.
+model) and the seed/logging hook are passed in at instantiate time
+(`instantiate(cfg.trainer, prior=prior, model=model, seed=cfg.seed)`),
+everything else is a plain config-driven hyperparameter on `self`. `run()`
+takes no arguments. This replaces an earlier version that threaded every
+hyperparameter through a `_train_loop(...)` helper function with a matching
+call in `main()` that manually unpacked `cfg.xxx` for each one -- pure
+duplication of the config schema, not an abstraction over it.
+
+No separate `bar_dist` argument -- `model.bar_dist` is the one, since
+`models/pfn.py` owns it as a submodule (see that module's docstring); a
+second, independently-constructed `BarDistribution` here could silently
+drift from the model's own if their `n_bins` ever disagreed.
 
 `mixed_precision` (AMP): ifBO's own `train.py` uses this
 (`torch.cuda.amp.autocast` + `GradScaler`, gated behind a
@@ -28,7 +33,6 @@ from typing import Callable
 
 import torch
 
-from anytimeacquisition.models.bar_distribution import BarDistribution
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.priors.bnn import BNNPrior
 
@@ -45,12 +49,11 @@ class PFNTrainer:
         self,
         prior: BNNPrior,
         model: PFN,
-        bar_dist: BarDistribution,
         seed: int = 0,
         n_steps: int = 500,
         min_train: int = 3,
-        max_train: int = 20,
-        n_test: int = 10,
+        max_train: int = 100,
+        n_test: int = 1000,
         lr: float = 1e-3,
         warmup_steps: int = 50,
         log_every: int = 50,
@@ -61,7 +64,7 @@ class PFNTrainer:
     ):
         self.prior = prior
         self.model = model
-        self.bar_dist = bar_dist
+        self.bar_dist = model.bar_dist
         self.seed = seed
         self.n_steps = n_steps
         self.min_train = min_train
@@ -111,7 +114,14 @@ class PFNTrainer:
 
             if step % self.log_every == 0 or step == self.n_steps - 1:
                 with torch.no_grad():
-                    eval_mse = (self.bar_dist.mean(logits) - y_te).square().mean().item()
+                    # logits came out of the autocast block above, so under
+                    # AMP it's float16 -- bar_dist's buffers (borders etc.)
+                    # are float32, and outside of autocast torch.matmul
+                    # refuses to mix the two ("expected scalar type Half but
+                    # found Float"). Eval logging isn't perf-critical, so
+                    # just force full precision here rather than re-entering
+                    # autocast.
+                    eval_mse = (self.bar_dist.mean(logits.float()) - y_te).square().mean().item()
                 metrics = {"train_nll": loss.item(), "eval_mse": eval_mse}
                 history["step"].append(step)
                 history["train_nll"].append(metrics["train_nll"])
