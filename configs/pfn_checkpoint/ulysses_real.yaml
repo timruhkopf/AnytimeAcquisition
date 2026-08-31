@@ -1,0 +1,23 @@
+# The "genuinely-sized" run from configs/experiment/pfn_ulysses_real.yaml
+# (5000 steps, d_model=256/6 layers, trained 2026-08-28 on ulysses -- see
+# that experiment file). NOT currently usable: `models/pfn_ulysses_real.pt`
+# was trained before the `PFN(x_dim=...)` -> `PFN(max_x_dim=...)` rename
+# (models/pfn.py, variable-x_dim support) and still has the OLD key
+# (`ckpt["config"]["x_dim"]`), so `PFN(**ckpt["config"])` now raises
+# `TypeError: unexpected keyword argument 'x_dim'` against it as-is --
+# needs retraining on ulysses (not silently reproducible on CPU here, and
+# not this session's call to make unprompted) before this descriptor is
+# accurate/usable. max_x_dim/d_model/etc. below are the OLD checkpoint's
+# actual values (read via `torch.load`, 2026-08-31), kept for reference --
+# don't select this entry (`pfn_checkpoint: ulysses_real`) until the .pt
+# has been regenerated and these are reconfirmed.
+checkpoint_path: ${aa_root:}/models/pfn_ulysses_real.pt
+max_x_dim: 2
+d_model: 256
+n_heads: 8
+n_layers: 6
+d_ff: 512
+n_bins: 128
+
+mlflow_run_id: null
+git_commit: null

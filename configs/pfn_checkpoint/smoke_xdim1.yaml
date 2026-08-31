@@ -1,0 +1,31 @@
+# Self-describing pointer to a trained PFN checkpoint -- so downstream
+# pipelines that consume a frozen PFN (action_head_posterior_distill.py,
+# explore_search_playground.py) reference ONE named entry instead of
+# duplicating checkpoint_path + x_dim by hand across their own configs (and
+# risking drift between them -- the exact bug that used to need a runtime
+# assert in those pipelines' main(); priors.x_dim/x_dim now interpolate
+# straight from max_x_dim below instead).
+#
+# Fields below mirror the checkpoint's own ckpt["config"]
+# (pipelines/train_pfn.py's load_pfn_checkpoint) and ARE re-validated
+# against it at runtime (a stale/hand-edited-wrong descriptor is still
+# possible -- there's no way to auto-sync a static config against a binary
+# artifact) -- update every field here by hand whenever the underlying .pt
+# changes, e.g. by copy-pasting `ckpt["config"]` after training.
+checkpoint_path: ${aa_root:}/models/pfn_smoke_xdim1.pt
+max_x_dim: 1
+d_model: 48
+n_heads: 4
+n_layers: 3
+d_ff: 128
+n_bins: 64
+
+# Provenance -- which training run produced this file. Also embedded in the
+# checkpoint itself (train_pfn.py's main() stashes these two into every .pt
+# it saves), so this is a convenience copy: visible/diffable/loggable as a
+# plain MLflow param without loading the checkpoint, not the sole record of
+# it -- downstream pipelines prefer the embedded value and only fall back to
+# this one. null means "not recorded" (e.g. trained before this existed, or
+# via the plain train_pfn() entry point with no MLflow run to reference).
+mlflow_run_id: null
+git_commit: null
