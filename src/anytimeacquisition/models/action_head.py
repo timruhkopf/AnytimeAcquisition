@@ -154,13 +154,27 @@ class ActionHead(nn.Module):
         self.policy_head = nn.Linear(d_model, 2 * x_dim)  # -> (alpha_raw, beta_raw) per dim
         self.value_head = nn.Linear(d_model, 1)
 
-    def forward(self, pfn: PFN, x_train: torch.Tensor, y_train: torch.Tensor, aux_features: dict) -> dict:
+    def forward(
+        self, pfn: PFN, x_train: torch.Tensor, y_train: torch.Tensor, aux_features: dict,
+        blind: bool = False,
+    ) -> dict:
         """x_train: [B,Ntr,x_dim]  y_train: [B,Ntr]
         aux_features: dict of the 4 AUX_FEATURE_NAMES -> [B] tensors.
         -> {"alpha": [B,x_dim], "beta": [B,x_dim], "value": [B]}, alpha/beta
         both >= 1 (see module docstring). Gradients never reach `pfn`'s
         parameters -- frozen + forward under `torch.no_grad()` below; see
         `tests/test_action_head.py::test_pfn_gradients_are_none_after_backward`.
+
+        `blind`: the "blind ActionHead" ablation flagged as not-yet-done in
+        `docs/milestones/M4.md` -- zeroes the PFN's per-layer train-token
+        hidden states before cross-attention, aux tokens untouched. Cross-
+        attending into all-zero K/V still runs (same op, same shapes; the
+        K/V projections' biases give a nonzero-but-context-independent
+        result), so this isolates "does the ActionHead's fit depend on the
+        specific PFN context" without changing the architecture or
+        parameter count between the real and blind runs -- see
+        `pipelines/action_head_posterior_distill.py`, which is what this
+        flag exists for.
         """
         B = x_train.shape[0]
         pfn.eval()
@@ -169,6 +183,8 @@ class ActionHead(nn.Module):
         x_test_empty = x_train.new_zeros(B, 0, x_train.shape[-1])
         with torch.no_grad():
             _, hidden_states = pfn(x_train, y_train, x_test_empty, return_hidden=True)
+        if blind:
+            hidden_states = [torch.zeros_like(hs) for hs in hidden_states]
         n_train = x_train.shape[1]
 
         tokens = [self.action_query.expand(B, -1, -1)]
@@ -191,12 +207,11 @@ class ActionHead(nn.Module):
 
 
 if __name__ == "__main__":
-    from pathlib import Path
-
+    from anytimeacquisition.utils.paths import CHECKPOINT_DIR
     from anytimeacquisition.pipelines.train_pfn import load_pfn_checkpoint
     from anytimeacquisition.priors.bnn import BNNPrior
 
-    checkpoint_path = Path(__file__).parent.parent / "pipelines" / "_checkpoints" / "pfn_smoke_xdim1.pt"
+    checkpoint_path = CHECKPOINT_DIR / "pfn_smoke_xdim1.pt"
     if not checkpoint_path.exists():
         raise SystemExit(
             f"No checkpoint at {checkpoint_path} -- train one first:\n"
