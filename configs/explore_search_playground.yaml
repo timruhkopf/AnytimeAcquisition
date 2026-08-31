@@ -1,0 +1,52 @@
+# Top-level Hydra config for pipelines/explore_search_playground.py --
+# a regret-validation sandbox for M5's explore branch, not a permanent
+# component other pipelines depend on. See the module docstring for the
+# "why" (does explore_search's weighted-NLL proxy actually reduce regret,
+# not just weighted NLL) and
+# docs/log/2026-08-28-explore-search-input-optimization-and-teacher-forcing.md
+# for the full design history behind this question.
+#
+# No `priors: bnn` default group here, deliberately: the pipeline needs a
+# *fresh* BNNPrior per episode (own seed each time), constructed inside the
+# loop -- a single Hydra-instantiated prior wouldn't fit that.
+defaults:
+  - callbacks: mlflow
+  - _self_
+  - optional experiment: null
+
+seed: 0
+allow_dirty: false
+
+# Anchored to the aa_root resolver (registered by src/anytimeacquisition/paths.py,
+# import side effect of anytimeacquisition/__init__.py) rather than Hydra's
+# default cwd-relative `outputs/...` -- keeps run dirs a top-level, gitignored
+# sibling of `src/` regardless of the invocation cwd (e.g. an IDE run config
+# defaulting to the script's own directory).
+hydra:
+  run:
+    dir: ${aa_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${aa_root:}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
+callbacks:
+  mlflow:
+    experiment_name: anytimeacquisition-explore-search-playground
+
+checkpoint_path: ${aa_root:}/models/pfn_smoke_xdim1.pt
+x_dim: 1
+prior_batch_size: 4
+
+n_episodes: 10
+n_init: 5
+n_steps: 15
+
+interesting_points:
+  n_sobol: 16
+  n_random: 16
+  n_basin_restarts: 8
+
+explore_search:
+  n_restarts: 8
+  n_steps: 30
+  lr: 0.05
