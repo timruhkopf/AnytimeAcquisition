@@ -34,5 +34,5 @@ trainer:
   warmup_steps: 200
   log_every: 100
   mixed_precision: true  # untested on real GPU hardware -- see docs/OPEN_QUESTIONS.md #7
-  checkpoint_path: ${hydra:runtime.cwd}/src/anytimeacquisition/pipelines/_checkpoints/pfn_ulysses_real.pt
+  checkpoint_path: ${aa_root:}/models/pfn_ulysses_real.pt
 device: cuda

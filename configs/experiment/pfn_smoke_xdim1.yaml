@@ -15,4 +15,4 @@ models:
 trainer:
   n_steps: 300
   log_every: 50
-  checkpoint_path: ${hydra:runtime.cwd}/src/anytimeacquisition/pipelines/_checkpoints/pfn_smoke_xdim1.pt
+  checkpoint_path: ${aa_root:}/models/pfn_smoke_xdim1.pt

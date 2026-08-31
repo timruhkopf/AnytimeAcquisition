@@ -189,5 +189,7 @@ cython_debug/
 # Regenerable prior ECDF cache and demo-plot output (BNNPrior)
 _ecdf_cache/
 _demo_plots/
-_checkpoints/
 !/logs/.gitkeep
+
+# Top-level PFN checkpoints (see src/anytimeacquisition/paths.py)
+/models/

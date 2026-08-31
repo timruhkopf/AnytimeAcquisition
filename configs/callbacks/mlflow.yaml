@@ -7,5 +7,5 @@
 # parallel jobs land in the same place, e.g.:
 #   AA_MLFLOW_DIR=/path/to/shared/project/mlruns
 mlflow:
-  tracking_uri: file://${oc.env:AA_MLFLOW_DIR,${hydra:runtime.cwd}/mlruns}
+  tracking_uri: file://${oc.env:AA_MLFLOW_DIR,${aa_root:}/mlruns}
   experiment_name: anytimeacquisition

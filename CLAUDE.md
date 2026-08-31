@@ -76,8 +76,25 @@ scripts/submit.sh <module> -m seed=0,1,2,3    # SLURM sweep via hydra-submitit-l
   because there's no DB server to coordinate across parallel SLURM jobs
   (mlflow 3.x deprecated the plain file store; `train.py` sets
   `MLFLOW_ALLOW_FILE_STORE=true` to opt back in). Tracking dir defaults to
-  `./mlruns`, override with the `AA_MLFLOW_DIR` env var to point at shared
-  cluster storage for a run to be visible across nodes.
+  `<repo_root>/mlruns`, override with the `AA_MLFLOW_DIR` env var to point at
+  shared cluster storage for a run to be visible across nodes.
+- **`outputs/`, `multirun/`, `mlruns/`, and `models/` are top-level,
+  gitignored siblings of `src/`** — `src/anytimeacquisition/utils/paths.py`
+  registers a custom `aa_root` OmegaConf resolver (`${aa_root:}` in
+  configs/*.yaml) from `PROJECT_ROOT`, a `Path(__file__)`-anchored constant,
+  not cwd-derived; `anytimeacquisition/__init__.py` imports `utils/paths.py`
+  unconditionally so the resolver is always registered before any pipeline's
+  `hydra.main`-decorated `main()` runs, with no per-pipeline setup needed.
+  `configs/*.yaml` interpolate `${aa_root:}` for `hydra.run.dir`/
+  `hydra.sweep.dir`, the MLflow tracking URI, and `checkpoint_path` — not
+  Hydra's own `${hydra:runtime.cwd}`, which silently re-nests all of these
+  under wherever a pipeline happens to be launched from (e.g. an IDE run
+  config that defaults to the script's own directory) instead of the repo
+  root. Non-Hydra call sites (demo `__main__` blocks, `pipelines/
+  train_pfn.py`'s plain `train_pfn()` function) import
+  `anytimeacquisition.utils.paths.PROJECT_ROOT`/`CHECKPOINT_DIR` directly
+  instead. New configs referencing these dirs should use `${aa_root:}`, not
+  reintroduce `${hydra:runtime.cwd}`.
 - **New components get a Hydra config group**, not hardcoded wiring — add
   `src/anytimeacquisition/<group>/<name>.py` + `configs/<group>/<name>.yaml`
   with a matching `_target_`, and reference it from `configs/config.yaml`'s
