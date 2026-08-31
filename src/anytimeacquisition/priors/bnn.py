@@ -141,6 +141,23 @@ class BNNPrior:
         ecdf_samples_per_draw: int = 300,
         cache_dir: str | Path | None = DEFAULT_CACHE_DIR,
         seed: int | None = None,
+        # Reuse an already-fit ECDF instead of fitting/loading this
+        # instance's own -- [1, ecdf_n_samples] or [B, ecdf_n_samples]
+        # (only the first row is used either way). For callbacks/
+        # dim_validation.py's dedicated per-dimension validation priors,
+        # which all share the TRAINING prior's own ecdf_sorted rather than
+        # each fitting an independent one -- matching ifBO's own approach
+        # (a single precomputed, universal calibration reference --
+        # `ifbo/priors/ftpfn_prior.py`'s `output_sorted.npy`, used
+        # regardless of which num_features a given sample happens to draw
+        # -- not a separate normalization per dimensionality). Letting each
+        # dimension's validation prior independently whiten its own raw-
+        # output distribution to [0,1] would risk masking genuine
+        # cross-dimension difficulty differences rather than revealing
+        # them -- see docs/log/2026-08-31-variable-xdim-training-
+        # stagnation.md. ecdf_n_samples/ecdf_n_draws/ecdf_samples_per_draw/
+        # cache_dir are ignored when this is given (no fitting happens).
+        ecdf_sorted: torch.Tensor | None = None,
     ):
         self.B, self.d, self.device = batch_size, x_dim, device
         self.depth_range = depth_range
@@ -164,7 +181,10 @@ class BNNPrior:
             self.generator.manual_seed(seed)
 
         self.reset()
-        self._load_or_fit_ecdf()
+        if ecdf_sorted is not None:
+            self.ecdf_sorted = ecdf_sorted[:1].to(self.device).expand(self.B, -1).clone()
+        else:
+            self._load_or_fit_ecdf()
 
     def reset(self) -> None:
         """Draw a fresh batch of B independent architectures/weights."""

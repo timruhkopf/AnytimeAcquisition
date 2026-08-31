@@ -31,6 +31,17 @@ def test_metrics_are_namespaced_under_callback_name():
     assert metrics == {"real_benchmark/regret": 0.5}
 
 
+def test_empty_name_skips_prefixing():
+    """name="" (falsy): for a callback whose fn already returns fully-
+    namespaced keys itself (metric-type-first grouping across several
+    sources -- see callbacks/dim_validation.py)."""
+    handler = CallbackHandler([Callback(name="", fn=lambda step, t: {"nll/val_dim1": 0.1, "nll/val_dim2": 0.2})])
+
+    metrics = handler.run(step=0, trainer=None, default_every_n_steps=1)
+
+    assert metrics == {"nll/val_dim1": 0.1, "nll/val_dim2": 0.2}
+
+
 def test_empty_or_none_result_logs_nothing():
     handler = CallbackHandler([
         Callback(name="prints_only", fn=lambda step, t: None),
@@ -91,7 +102,7 @@ def test_pfn_trainer_wires_callback_metrics_into_history_and_on_log(tmp_path):
 
     assert result["history"]["edge_case/flag"] == [1.0, 1.0]
     assert all("edge_case/flag" in metrics for _, metrics in logged)
-    assert all("train/nll" in metrics and "eval/mse" in metrics for _, metrics in logged)
+    assert all("nll/train" in metrics and "mse/train" in metrics for _, metrics in logged)
 
 
 def test_dummy_trainer_merges_callback_metrics_into_result():

@@ -35,7 +35,7 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from anytimeacquisition.callbacks.dim_validation import build_dim_validation_callbacks
+from anytimeacquisition.callbacks.dim_validation import build_dim_validation_callback
 from anytimeacquisition.deployment.provenance import record_provenance
 from anytimeacquisition.models.bar_distribution import BarDistribution
 from anytimeacquisition.models.pfn import PFN
@@ -352,14 +352,17 @@ def main(cfg: DictConfig) -> dict:
         model_config.pop("_target_")
 
         # Per-dimension validation (docs/log/2026-08-31-variable-xdim-
-        # training-stagnation.md): reports NLL/eval_mse against dedicated,
-        # fixed-x_dim BNNPrior instances, one per entry in validate_dims --
-        # opt-in (unset/empty means no extra callbacks, the ordinary case
-        # for a fixed-x_dim run). prior_kwargs mirrors cfg.priors' own
-        # family settings so the comparison is apples-to-apples; the
-        # per-dimension fields (x_dim/variable_dim_min/batch_size) and the
-        # ECDF-cost fields (deliberately cheaper for these -- see
-        # callbacks/dim_validation.py) are stripped rather than reused.
+        # training-stagnation.md): reports nll/val_dimN, mse/val_dimN
+        # against dedicated, fixed-x_dim BNNPrior instances, one per entry
+        # in validate_dims -- opt-in (unset/empty means no extra callbacks,
+        # the ordinary case for a fixed-x_dim run). prior_kwargs mirrors
+        # cfg.priors' own family settings so the comparison is apples-to-
+        # apples; the per-dimension fields (x_dim/variable_dim_min/
+        # batch_size) and the now-irrelevant ECDF-fit-cost fields (every
+        # dedicated prior shares `prior`'s own ecdf_sorted below instead of
+        # independently fitting one -- see callbacks/dim_validation.py's
+        # module docstring for why that matters, not just performance) are
+        # stripped rather than reused.
         validate_dims = cfg.get("validate_dims", None)
         callbacks = None
         if validate_dims:
@@ -369,10 +372,10 @@ def main(cfg: DictConfig) -> dict:
                 "ecdf_n_samples", "ecdf_n_draws", "ecdf_samples_per_draw", "cache_dir",
             ):
                 prior_kwargs.pop(key, None)
-            callbacks = build_dim_validation_callbacks(
+            callbacks = [build_dim_validation_callback(
                 dims=list(validate_dims), max_x_dim=cfg.priors.x_dim,
-                prior_kwargs=prior_kwargs, seed=cfg.seed,
-            )
+                ecdf_sorted=prior.ecdf_sorted, prior_kwargs=prior_kwargs, seed=cfg.seed,
+            )]
 
         trainer = instantiate(
             cfg.trainer, prior=prior, model=model, seed=cfg.seed, model_config=model_config,

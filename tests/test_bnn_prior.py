@@ -154,3 +154,27 @@ def test_ecdf_cache_roundtrip(tmp_path):
     assert torch.equal(prior_a.ecdf_sorted[0], prior_b.ecdf_sorted[0])
     assert prior_b.ecdf_sorted.shape[0] == 7
     assert len(list(tmp_path.glob("*.pt"))) == 1  # no second cache file written
+
+
+def test_ecdf_sorted_override_skips_fitting_entirely():
+    """callbacks/dim_validation.py's whole reason for existing: a prior
+    constructed with a DIFFERENT x_dim can still share another prior's
+    already-fit ecdf_sorted verbatim, rather than fitting its own (which
+    would calibrate against only its own dimension's raw-output
+    distribution -- see that module's docstring)."""
+    source = BNNPrior(batch_size=4, x_dim=3, seed=0, cache_dir=None, **FAST_ECDF_KWARGS)
+
+    reused = BNNPrior(
+        batch_size=6, x_dim=1, seed=99, cache_dir=None, ecdf_sorted=source.ecdf_sorted,
+    )
+
+    assert torch.equal(reused.ecdf_sorted[0], source.ecdf_sorted[0])
+    assert reused.ecdf_sorted.shape[0] == 6  # expanded to its own batch_size, not source's
+
+
+def test_ecdf_sorted_override_accepts_single_row():
+    source = BNNPrior(batch_size=4, x_dim=3, seed=0, cache_dir=None, **FAST_ECDF_KWARGS)
+
+    reused = BNNPrior(batch_size=2, x_dim=1, seed=0, cache_dir=None, ecdf_sorted=source.ecdf_sorted[:1])
+
+    assert torch.equal(reused.ecdf_sorted[0], source.ecdf_sorted[0])

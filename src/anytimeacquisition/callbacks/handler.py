@@ -26,7 +26,13 @@ class Callback:
 
     Metrics are namespaced under `name` (e.g. name="real_benchmark" ->
     "real_benchmark/regret") -- same MLflow dashboard-grouping convention as
-    `trainer/pfn_trainer.py`'s own `train/nll`, `eval/mse`.
+    `trainer/pfn_trainer.py`'s own `nll/train`, `mse/train`. `name=""`
+    (falsy) skips this prefixing entirely -- for a callback whose `fn`
+    already returns fully-namespaced keys itself (e.g. one hook computing
+    several metric *types* across several probes/sources at once, where
+    grouping by metric type first -- `nll/val_dim1`, `nll/val_dim2`, ... --
+    reads better on a dashboard than grouping by source first; see
+    `callbacks/dim_validation.py`).
 
     `every_n_steps` defaults to the trainer's own logging cadence (None);
     set it explicitly for a callback that should run coarser (an expensive
@@ -54,6 +60,8 @@ class Callback:
         result = self.fn(step, trainer)
         if not result:
             return {}
+        if not self.name:
+            return dict(result)
         return {f"{self.name}/{k}": v for k, v in result.items()}
 
 

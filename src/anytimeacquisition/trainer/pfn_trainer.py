@@ -177,9 +177,15 @@ class PFNTrainer:
                     # a dashboard/grouping concern, kept separate from
                     # `metrics`/`history`'s own flat keys (which
                     # tests/checkpoints/train_pfn.py's summary log already
-                    # depend on). Callback metrics are already namespaced by
-                    # the Callback itself, so they pass through unchanged.
-                    mlflow_metrics = {"train/nll": metrics["train_nll"], "eval/mse": metrics["eval_mse"]}
+                    # depend on). Metric-type first (nll/train, mse/train),
+                    # matching callbacks/dim_validation.py's nll/val_dimN,
+                    # mse/val_dimN -- so MLflow groups all nll curves
+                    # together, all mse curves together, rather than one
+                    # folder per source with both metrics inside it.
+                    # Callback metrics already arrive pre-namespaced this
+                    # way (see Callback's name="" case), so they pass
+                    # through unchanged.
+                    mlflow_metrics = {"nll/train": metrics["train_nll"], "mse/train": metrics["eval_mse"]}
                     mlflow_metrics.update(
                         {k: v for k, v in metrics.items() if k not in ("train_nll", "eval_mse")}
                     )
