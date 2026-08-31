@@ -22,13 +22,21 @@ picked silently. Resolve and delete/move to a changelog as they're settled.
 
 4. **SLURM cluster specifics.** `scripts/slurm/train.sbatch` and
    `configs/deployment/slurm.yaml` have TODOs for partition, account, QOS,
-   time limits, and GPU requests — need real values for your cluster
-   (`ulysses`/`ssh2.ai.uni-hannover.de` per the notes at repo root).
+   time limits, and GPU requests — need real values for the actual SLURM
+   cluster, LUIS (`luis` / `login.cluster.uni-hannover.de` per the user's
+   own SSH config; a dedicated `luis-transfer` /
+   `transfer.cluster.uni-hannover.de` host also exists for data transfer,
+   not the login node). **Not `ulysses`** — that's a separate, personal
+   single-GPU office machine (SSH alias `ulysses`, jump-hosted through
+   `ai-gateway`/`ssh2.ai.uni-hannover.de`) used as a PyCharm remote
+   interpreter for small-scale/sanity-check GPU runs, not a job scheduler —
+   earlier notes here (and the repo-root `ulysses` file's name) conflated
+   the two; corrected 2026-08-31.
 
 5. ~~uv vs. conda on the cluster.~~ **Resolved 2026-08-28: uv.**
    `scripts/slurm/train.sbatch` and `scripts/submit.sh` now `source
    .venv/bin/activate` (a `.venv` built ahead of time via `uv sync --extra
-   cu126` on the login node) rather than activating the `anytimeacquisition`
+   cu124` on the login node) rather than activating the `anytimeacquisition`
    conda env. The conda env referenced in the `ulysses` notes is no longer
    what these scripts use — if anything still depends on it, that's now
    stale.
@@ -37,26 +45,31 @@ picked silently. Resolve and delete/move to a changelog as they're settled.
    parallel SLURM jobs point MLflow's file store at so all runs land in one
    place?
 
-7. **Python/torch version pinning, and CUDA torch for the cluster.**
-   `pyproject.toml` currently allows `torch>=2.13.0` and `python>=3.10` —
-   fine as a floor. As of 2026-08-28, torch is split into two conflicting
-   `uv` extras (`cpu`/`cu126`, see `pyproject.toml`'s own comments) instead
-   of one hardcoded index — `uv sync --extra cpu` locally (no working CUDA
-   driver on this machine, and the default GPU wheel's bundled nvidia-*
-   packages turned out to intermittently corrupt on download here),
-   `uv sync --extra cu126` on Ulysses. **`cu126` is a guess, not verified**
-   — run `nvidia-smi` on Ulysses to check the actual driver's max supported
-   CUDA version before relying on it; if it needs a different one, add
-   another `[[tool.uv.index]]` entry and extra (same pattern) rather than
-   just changing the URL, so both variants stay available in one lockfile.
-   Also confirmed empirically: **always pass an `--extra` flag** — a bare
-   `uv sync` does not fail cleanly and does not skip torch, it silently
-   falls through to the unconstrained default GPU wheel anyway (`tabpfn`
-   also depends on torch, untied to either of our extras) — see
-   `pyproject.toml`'s comment. Once cu126 (or whatever's correct) is
-   confirmed: `trainer/pfn_trainer.py`'s `mixed_precision` (AMP) support
-   needs validating on real GPU hardware too — implemented and CPU-safe,
-   but never actually exercised on CUDA.
+7. ~~Python/torch version pinning, and CUDA torch for `ulysses`.~~
+   **Partially resolved 2026-08-31: `cu124` confirmed correct on
+   `ulysses`** (`nvidia-smi` shows driver supports CUDA 12.4) — the extra
+   was renamed from the earlier `cu126` guess to `cu124` in
+   `pyproject.toml`, fully wired (`[tool.uv.sources]`/`[[tool.uv.index]]`
+   pointing at `download.pytorch.org/whl/cu124`), `botorch` included.
+   **Still open for LUIS**: LUIS's actual GPU nodes are a separate machine
+   from `ulysses` (see item 4's 2026-08-31 correction) with a
+   possibly-different driver — `cu124` is a reasonable starting guess since
+   it matched `ulysses`, but not verified there. Run `nvidia-smi` on a LUIS
+   GPU node (or check its docs) before trusting it for a real run; if it
+   needs a different CUDA version, add another `[[tool.uv.index]]` entry +
+   extra (same pattern as `cpu`/`cu124`) rather than changing the existing
+   one, so both stay available in one lockfile.
+   `pyproject.toml` currently allows `torch>=2.13.0` and `python>=3.10` as
+   a floor — fine. Also confirmed empirically: **always pass an `--extra`
+   flag** — a bare `uv sync` does not fail cleanly and does not skip torch,
+   it silently falls through to the unconstrained default GPU wheel anyway
+   (`tabpfn` also depends on torch, untied to either of our extras) — see
+   `pyproject.toml`'s comment.
+   Separately: `trainer/pfn_trainer.py`'s `mixed_precision` (AMP) support
+   still needs validating on real GPU hardware — implemented and CPU-safe,
+   but never actually exercised on CUDA (not blocked on the LUIS driver
+   question above — could be checked on `ulysses` now that its CUDA
+   version is confirmed).
 
 8. ~~ECDF-normalizing the prior's output vs. adaptive bar-distribution bin
    borders.~~ **Resolved 2026-08-28**: bounded `BarDistribution` on M1's

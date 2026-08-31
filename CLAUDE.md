@@ -42,20 +42,36 @@ uv run python -m anytimeacquisition.pipelines.train_pfn experiment=pfn_smoke_xdi
 scripts/submit.sh <module> [overrides...]     # sbatch a single SLURM run
 scripts/submit.sh <module> -m seed=0,1,2,3    # SLURM sweep via hydra-submitit-launcher
 # e.g. scripts/submit.sh anytimeacquisition.pipelines.train_pfn experiment=pfn_ulysses_real
+scripts/mlflow_tunnel_ulysses.sh [local_port] # live SSH tunnel to ulysses' MLflow dashboard
+scripts/mlflow_sync_luis.sh [local_port]      # rsync LUIS's mlruns/ down, then view locally
 ```
 
-- `torch` is split into two conflicting `uv` extras (`cpu`/`cu126`), not a
-  plain dependency — **always pass `--extra cpu` or `--extra cu126`**, a
+Three separate compute environments, each with its own MLflow data — not one
+"the cluster": **local** (this laptop, CPU-only, debugging), **ulysses**
+(personal single-GPU office machine, SSH alias `ulysses`, used as a PyCharm
+remote interpreter for small-scale/sanity-check GPU runs — not a job
+scheduler), and **LUIS** (the actual SLURM cluster, SSH alias `luis`, shared
+login node — heavy training runs go here via `scripts/submit.sh`). See
+`scripts/mlflow_tunnel_ulysses.sh` / `scripts/mlflow_sync_luis.sh` for why
+they use different mechanisms (live tunnel vs. sync-then-view) — the login
+node's shared, so nothing long-running gets started there.
+
+- `torch` is split into two conflicting `uv` extras (`cpu`/`cu124`), not a
+  plain dependency — **always pass `--extra cpu` or `--extra cu124`**, a
   bare `uv sync` does not fail cleanly (see `pyproject.toml`'s comment for
-  why). `cu126` is a guess for the SLURM cluster's CUDA version, unverified
-  — check with `nvidia-smi` before trusting it (`docs/OPEN_QUESTIONS.md` #7).
-- `scripts/submit.sh`/`scripts/slurm/train.sbatch` take the pipeline module
-  as their first argument now (used to hardcode `pipelines.train`) and
-  activate a pre-built `.venv` (`source .venv/bin/activate`), not a conda
-  env — sync the venv once on the cluster's login node
-  (`uv sync --extra cu126`) before submitting, don't rely on the job itself
-  to provision anything (no `uv run` inside the sbatch script — compute
-  nodes often have no network access).
+  why). `cu124` is confirmed correct on `ulysses` (`nvidia-smi`, verified
+  2026-08-31) but **not yet checked on LUIS** — its GPU nodes are a
+  separate machine with a possibly-different driver, don't assume it's the
+  same without checking (`docs/OPEN_QUESTIONS.md` #7).
+- `scripts/submit.sh`/`scripts/slurm/train.sbatch` target LUIS (the actual
+  SLURM cluster, not `ulysses` — see `docs/OPEN_QUESTIONS.md` #4), take the
+  pipeline module as their first argument now (used to hardcode
+  `pipelines.train`), and activate a pre-built `.venv` (`source
+  .venv/bin/activate`), not a conda env — sync the venv once on LUIS's
+  login node (`uv sync --extra cu124`, or `cpu` if that turns out wrong for
+  LUIS's GPU nodes) before submitting, don't rely on the job itself to
+  provision anything (no `uv run` inside the sbatch script — compute nodes
+  often have no network access).
 
 - `configs/train_pfn.yaml` is a **separate** top-level Hydra composition
   from `configs/config.yaml` — PFN pretraining (M2) doesn't touch

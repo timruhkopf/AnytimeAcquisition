@@ -9,13 +9,14 @@ requires-python = ">=3.10"
 dependencies = [
     "hydra-core>=1.3.5",
     "hydra-submitit-launcher>=1.2.0",
+    "ipykernel>=7.3.0",
     "matplotlib>=3.10.9",
     "mlflow>=3.15.2",
     "seaborn>=0.13.2",
     # tabpfn: commented out -- nothing in src/ actually imports it (M2 built
     # a custom PFN, not TabPFN's own architecture; see docs/log/2026-08-27-
     # pfns4bo-bnn-prior-comparison.md). It also independently depends on
-    # torch, unconditioned on our cpu/cu126 extras below -- that's what
+    # torch, unconditioned on our cpu/cu124 extras below -- that's what
     # caused the bare-`uv sync` footgun described below. Re-add only if
     # something actually needs it, and re-check that footgun if you do.
 ]
@@ -25,11 +26,13 @@ dependencies = [
 # per-machine choice, not something uv can infer, so it lives here as two
 # conflicting extras instead. Pick one at sync time:
 #   uv sync --extra cpu     # local dev (this machine has no CUDA driver)
-#   uv sync --extra cu126   # CUDA cluster (Ulysses) -- VERIFY cu126 first,
-#                            # see docs/OPEN_QUESTIONS.md #7; run `nvidia-smi`
-#                            # on the cluster and change the extra name/index
-#                            # below if its driver needs a different CUDA
-#                            # version. Never verified on real GPU hardware.
+#   uv sync --extra cu124   # ulysses (personal GPU box, NOT the LUIS SLURM
+#                            # cluster -- see docs/OPEN_QUESTIONS.md #4).
+#                            # cu124 confirmed correct here (`nvidia-smi`:
+#                            # driver supports CUDA 12.4, 2026-08-31).
+#                            # LUIS's own GPU nodes are a SEPARATE, still-
+#                            # unverified driver -- see #7 -- don't assume
+#                            # cu124 is right there without checking.
 #
 # ALWAYS pass one of the two --extra flags. A bare `uv sync` does NOT fail
 # cleanly and does NOT skip torch -- verified empirically (2026-08-28, while
@@ -42,16 +45,21 @@ dependencies = [
 # transitively -- the extras split only protects requirement edges that
 # carry one of our extra markers.
 [project.optional-dependencies]
-cpu = ["torch>=2.13.0"]
-cu126 = ["torch>=2.13.0"]
+# botorch/gpytorch live in these extras (not the plain `dependencies` list
+# above) for the same reason torch does: botorch depends on torch
+# unconditionally, and a plain `dependencies` entry would reintroduce the
+# exact bare-`uv sync` footgun tabpfn caused (see the comment above) --
+# only ever pulled in when --extra cpu/cu124 is explicitly selected.
+cpu = ["torch>=2.3.0", "botorch>=0.12.0"]
+cu124 = ["torch>=2.3.0", "botorch>=0.12.0"]
 
 [tool.uv]
-conflicts = [[{ extra = "cpu" }, { extra = "cu126" }]]
+conflicts = [[{ extra = "cpu" }, { extra = "cu124" }]]
 
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu124", extra = "cu124" },
 ]
 
 [[tool.uv.index]]
@@ -60,8 +68,8 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [project.scripts]

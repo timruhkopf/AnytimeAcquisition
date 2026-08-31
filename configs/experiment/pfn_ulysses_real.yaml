@@ -1,15 +1,16 @@
 # @package _global_
-# A genuinely-sized training run, meant for the CUDA cluster (Ulysses) --
-# not a smoke test like pfn_smoke_xdim1/xdim2. See docs/milestones/M2.md
-# and the "training on Ulysses" section of docs/log/ for how to actually
-# launch this.
+# A genuinely-sized training run, meant for the `ulysses` GPU box (a
+# personal single-GPU machine, NOT the LUIS SLURM cluster -- see
+# docs/OPEN_QUESTIONS.md #4) -- not a smoke test like pfn_smoke_xdim1/xdim2.
+# See docs/milestones/M2.md and the "training on Ulysses" section of
+# docs/log/ for how to actually launch this.
 #
 # Sizing here is a reasonable *first real run*, not a tuned optimum --
 # PFNs4BO's own production models go considerably bigger (emsize=512,
 # nhid=1024, nlayers=12) and train far longer. Scale this up once you've
 # confirmed it converges and know your actual wall-clock budget.
 priors:
-  batch_size: 128
+  batch_size: 32
   # NOT bumping the ECDF fit settings beyond priors/bnn.yaml's own defaults
   # here -- measured first (2026-08-28): at the current family config
   # (x_dim=4, depth up to 32, sparseness/noise/spurious-dims all active),
