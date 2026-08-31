@@ -27,8 +27,8 @@ The CUDA path itself needs validating for real once training moves to
 hardware that has a GPU, before trusting it for a real run.
 
 `callbacks` (list[`callbacks.handler.Callback`]): injectable, periodic
-metric-computation hooks beyond the loop's own built-in `train_nll`/
-`eval_mse` -- e.g. validation performance on a real benchmark, or a special
+metric-computation hooks beyond the loop's own built-in `nll/train`/
+`mse/train` -- e.g. validation performance on a real benchmark, or a special
 edge-case check -- without this loop needing to hardcode what else gets
 checked during training. See `callbacks/handler.py`'s module docstring;
 `trainer/dummy.py` wires the same mechanism for its own (currently
@@ -156,10 +156,17 @@ class PFNTrainer:
                     # just force full precision here rather than re-entering
                     # autocast.
                     eval_mse = (self.bar_dist.mean(logits.float()) - y_te).square().mean().item()
-                metrics = {"train_nll": loss.item(), "eval_mse": eval_mse}
+                # "/"-namespaced from construction (metric-type first,
+                # matching callbacks/dim_validation.py's nll/val_dimN,
+                # mse/val_dimN -- so MLflow groups all nll curves together,
+                # all mse curves together, rather than one folder per
+                # source with both metrics inside it) -- history/the
+                # returned dict use these same keys directly, no separate
+                # internal-vs-MLflow-facing translation.
+                metrics = {"nll/train": loss.item(), "mse/train": eval_mse}
                 # Already-namespaced (e.g. "real_benchmark/regret") -- see
                 # callbacks/handler.py -- so these merge straight in
-                # alongside train_nll/eval_mse without colliding.
+                # alongside nll/train, mse/train without colliding.
                 metrics.update(self.callback_handler.run(step, self, self.log_every))
 
                 history["step"].append(step)
@@ -167,29 +174,13 @@ class PFNTrainer:
                     history.setdefault(k, []).append(v)
 
                 extra = "  ".join(
-                    f"{k}={v:.4f}" for k, v in metrics.items() if k not in ("train_nll", "eval_mse")
+                    f"{k}={v:.4f}" for k, v in metrics.items() if k not in ("nll/train", "mse/train")
                 )
-                print(f"step {step:5d}  train_nll={metrics['train_nll']:.4f}  eval_mse={metrics['eval_mse']:.4f}  "
+                print(f"step {step:5d}  train_nll={metrics['nll/train']:.4f}  eval_mse={metrics['mse/train']:.4f}  "
                       f"n_train={n_train}" + (f"  {extra}" if extra else "")
                       + f"  ({time.perf_counter() - t0:.1f}s elapsed)")
                 if self.on_log is not None:
-                    # "/"-namespaced only at this MLflow-facing boundary --
-                    # a dashboard/grouping concern, kept separate from
-                    # `metrics`/`history`'s own flat keys (which
-                    # tests/checkpoints/train_pfn.py's summary log already
-                    # depend on). Metric-type first (nll/train, mse/train),
-                    # matching callbacks/dim_validation.py's nll/val_dimN,
-                    # mse/val_dimN -- so MLflow groups all nll curves
-                    # together, all mse curves together, rather than one
-                    # folder per source with both metrics inside it.
-                    # Callback metrics already arrive pre-namespaced this
-                    # way (see Callback's name="" case), so they pass
-                    # through unchanged.
-                    mlflow_metrics = {"nll/train": metrics["train_nll"], "mse/train": metrics["eval_mse"]}
-                    mlflow_metrics.update(
-                        {k: v for k, v in metrics.items() if k not in ("train_nll", "eval_mse")}
-                    )
-                    self.on_log(step, mlflow_metrics)
+                    self.on_log(step, metrics)
 
         if self.checkpoint_path is not None:
             checkpoint_path = Path(self.checkpoint_path)

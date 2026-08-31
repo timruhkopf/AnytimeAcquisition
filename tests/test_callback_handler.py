@@ -81,7 +81,7 @@ def test_callback_receives_the_trainer_instance():
 def test_pfn_trainer_wires_callback_metrics_into_history_and_on_log(tmp_path):
     """End-to-end: a Callback registered on PFNTrainer shows up namespaced
     in both the returned history and the on_log-facing metrics dict,
-    alongside the loop's own built-in train_nll/eval_mse."""
+    alongside the loop's own built-in nll/train, mse/train."""
     from anytimeacquisition.models.pfn import PFN
     from anytimeacquisition.priors.bnn import BNNPrior
     from anytimeacquisition.trainer.pfn_trainer import PFNTrainer

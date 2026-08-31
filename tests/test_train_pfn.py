@@ -14,7 +14,7 @@ def test_training_nll_decreases(tmp_path):
         prior_kwargs=dict(ecdf_n_draws=5, ecdf_samples_per_draw=50, cache_dir=None),
         checkpoint_path=tmp_path / "smoke.pt",
     )
-    nlls = result["history"]["train_nll"]
+    nlls = result["history"]["nll/train"]
     assert len(nlls) >= 2
     assert nlls[-1] < nlls[0]
     assert (tmp_path / "smoke.pt").exists()
@@ -34,7 +34,7 @@ def test_mixed_precision_request_on_cpu_is_a_safe_no_op(tmp_path, capsys):
         checkpoint_path=tmp_path / "amp_smoke.pt",
         mixed_precision=True,
     )
-    assert len(result["history"]["train_nll"]) >= 2
+    assert len(result["history"]["nll/train"]) >= 2
     assert "ignoring" in capsys.readouterr().out
 
 
