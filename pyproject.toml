@@ -82,6 +82,15 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    # `ipykernel` (in the cpu/cu124 extras, needed for the notebooks
+    # themselves to run at all) doesn't include the CLI driver used to
+    # re-execute a notebook headless outside an IDE (CLAUDE.md's own
+    # convention: `jupyter nbconvert --to notebook --execute --inplace
+    # <path>` after changing a component a notebook showcases) -- without
+    # this, that command silently falls through to whatever nbconvert
+    # happens to be on PATH globally (if any), which won't have this
+    # project's own packages installed.
+    "nbconvert>=7.16.0",
 ]
 
 [tool.pytest.ini_options]
