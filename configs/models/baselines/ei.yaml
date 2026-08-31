@@ -1,0 +1,10 @@
+# GP + (Log) Expected Improvement baseline (M6) -- BoTorch.
+# `_partial_: true` makes `instantiate(cfg)` return a
+# `functools.partial(gp_acquisition_policy, acquisition="EI", ...)` callable
+# matching `policy_fn(x_context, y_context, x_dim)`'s signature exactly --
+# drop straight into `trainer.exit_rollout.rollout_episode` as `policy_fn`.
+_target_: anytimeacquisition.models.baselines.gp_acquisition.gp_acquisition_policy
+_partial_: true
+acquisition: EI
+num_restarts: 10
+raw_samples: 256

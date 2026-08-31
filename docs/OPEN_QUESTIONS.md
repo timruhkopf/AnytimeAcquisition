@@ -15,10 +15,16 @@ picked silently. Resolve and delete/move to a changelog as they're settled.
    yet — needed to configure Phase 1's prior, Phase 2's PFN retraining, and
    Phase 6's baselines consistently.
 
-3. **Baseline BO library.** For GP + EI/UCB/PI/ES baselines: BoTorch,
-   GPyTorch, scikit-optimize, or something else? Affects `models/baselines/`
-   and possibly `models/surrogates/` if the surrogate should share machinery
-   with the baselines.
+3. ~~Baseline BO library.~~ **Resolved 2026-08-28: BoTorch.** GP + EI/PI/ES
+   (Max-value Entropy Search) landed in
+   `models/baselines/gp_acquisition.py` + `configs/models/baselines/{ei,pi,es}.yaml`,
+   sanity-checked (M6.md's required check) against random search on the same
+   `BNNPrior` instances — all three beat it. UCB (also listed in M6's
+   original scope) not built yet, trivial to add the same way if wanted.
+   `models/surrogates/` (the PFN) does not share machinery with these —
+   deliberately independent, since the whole comparison is "learned
+   in-context acquisition vs. classical GP + hand-crafted acquisition,"
+   sharing a surrogate would blur that.
 
 4. **SLURM cluster specifics.** `scripts/slurm/train.sbatch` and
    `configs/deployment/slurm.yaml` have TODOs for partition, account, QOS,

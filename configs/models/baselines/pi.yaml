@@ -1,0 +1,7 @@
+# GP + Probability of Improvement baseline (M6) -- BoTorch. See ei.yaml's
+# comment for what `_partial_: true` buys here.
+_target_: anytimeacquisition.models.baselines.gp_acquisition.gp_acquisition_policy
+_partial_: true
+acquisition: PI
+num_restarts: 10
+raw_samples: 256

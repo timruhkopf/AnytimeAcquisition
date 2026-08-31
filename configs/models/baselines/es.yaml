@@ -1,0 +1,11 @@
+# GP + Max-value Entropy Search baseline (M6) -- BoTorch's
+# `qMaxValueEntropy`, the standard/stable entropy-search acquisition in the
+# installed version (predictive/joint entropy-search variants exist in some
+# BoTorch versions but are less standard as a baseline). See ei.yaml's
+# comment for what `_partial_: true` buys here.
+_target_: anytimeacquisition.models.baselines.gp_acquisition.gp_acquisition_policy
+_partial_: true
+acquisition: ES
+num_restarts: 10
+raw_samples: 256
+mes_candidate_set_size: 1000
