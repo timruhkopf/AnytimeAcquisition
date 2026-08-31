@@ -353,6 +353,16 @@ def main(cfg: DictConfig) -> dict:
         trainer = instantiate(
             cfg.trainer, prior=prior, model=model, seed=cfg.seed, model_config=model_config,
             on_log=lambda step, metrics: mlflow.log_metrics(metrics, step=step),
+            # Checkpoint lineage: lets any downstream pipeline that loads
+            # this checkpoint (action_head_posterior_distill.py,
+            # explore_search_playground.py) log a tag pointing back at the
+            # exact MLflow run + commit that produced it, not just its
+            # architecture config (already covered by `model_config`/
+            # `pfn_checkpoint.*` params there).
+            extra_checkpoint_metadata={
+                "mlflow_run_id": mlflow.active_run().info.run_id,
+                "git_commit": provenance.commit,
+            },
         )
         result = trainer.run()
 

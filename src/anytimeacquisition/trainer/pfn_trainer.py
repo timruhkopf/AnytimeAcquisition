@@ -25,6 +25,14 @@ see docs/log/. Implemented here with the modern, device-generic
 CPU run, including all of M2's current smoke checkpoints, actually takes.
 The CUDA path itself needs validating for real once training moves to
 hardware that has a GPU, before trusting it for a real run.
+
+`callbacks` (list[`callbacks.handler.Callback`]): injectable, periodic
+metric-computation hooks beyond the loop's own built-in `train_nll`/
+`eval_mse` -- e.g. validation performance on a real benchmark, or a special
+edge-case check -- without this loop needing to hardcode what else gets
+checked during training. See `callbacks/handler.py`'s module docstring;
+`trainer/dummy.py` wires the same mechanism for its own (currently
+trivial) loop.
 """
 import math
 import time
@@ -33,6 +41,7 @@ from typing import Callable
 
 import torch
 
+from anytimeacquisition.callbacks.handler import Callback, CallbackHandler
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.priors.bnn import BNNPrior
 
@@ -61,6 +70,24 @@ class PFNTrainer:
         model_config: dict | None = None,
         on_log: Callable[[int, dict], None] | None = None,
         mixed_precision: bool = False,
+        # Sibling top-level checkpoint keys (alongside model_state/config/
+        # history), never merged into model_config -- that dict gets
+        # **-unpacked straight into PFN(**ckpt["config"]) at load time
+        # (pipelines/train_pfn.py's load_pfn_checkpoint), so anything not a
+        # PFN constructor kwarg has to live elsewhere. For checkpoint
+        # lineage (e.g. {"mlflow_run_id": ..., "git_commit": ...}) -- see
+        # pipelines/train_pfn.py's main(), which is the only caller that
+        # has an MLflow run to reference; None (the default, e.g. the plain
+        # train_pfn() entry point) means no lineage metadata is saved.
+        extra_checkpoint_metadata: dict | None = None,
+        # Injectable, periodic metric-computation hooks beyond the loop's
+        # own built-in train/nll + eval/mse -- e.g. validation performance
+        # on a real benchmark, or a special edge-case check -- see
+        # callbacks/handler.py. Each gets `(step, self)`, so a callback can
+        # read `self.model`/`self.prior`/`self.bar_dist` as needed; results
+        # are merged into the same metrics dict logged/returned every step,
+        # namespaced under the Callback's own `name`.
+        callbacks: list[Callback] | None = None,
     ):
         self.prior = prior
         self.model = model
@@ -77,6 +104,8 @@ class PFNTrainer:
         self.model_config = model_config
         self.on_log = on_log
         self.mixed_precision = mixed_precision
+        self.extra_checkpoint_metadata = extra_checkpoint_metadata
+        self.callback_handler = CallbackHandler(callbacks)
 
     def run(self) -> dict:
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
@@ -94,7 +123,7 @@ class PFNTrainer:
         scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
 
         generator = torch.Generator().manual_seed(self.seed)
-        history = {"step": [], "train_nll": [], "eval_mse": []}
+        history = {"step": []}
         t0 = time.perf_counter()
 
         for step in range(self.n_steps):
@@ -103,7 +132,11 @@ class PFNTrainer:
             x_tr, y_tr, x_te, y_te = self.prior.sample_episode(n_train, self.n_test)
 
             with torch.amp.autocast(device_type=device_type, enabled=use_amp):
-                logits = self.model(x_tr, y_tr, x_te)
+                # prior.active_dim: [B] -- BNNPrior's own per-instance real
+                # feature count (torch.full((B,), x_dim) i.e. a no-op unless
+                # priors.variable_dim_min is set, see priors/bnn.py), passed
+                # straight through as the PFN's n_features (models/pfn.py).
+                logits = self.model(x_tr, y_tr, x_te, n_features=self.prior.active_dim)
                 loss = self.bar_dist(logits, y_te).mean()
 
             optimizer.zero_grad()
@@ -123,19 +156,44 @@ class PFNTrainer:
                     # autocast.
                     eval_mse = (self.bar_dist.mean(logits.float()) - y_te).square().mean().item()
                 metrics = {"train_nll": loss.item(), "eval_mse": eval_mse}
+                # Already-namespaced (e.g. "real_benchmark/regret") -- see
+                # callbacks/handler.py -- so these merge straight in
+                # alongside train_nll/eval_mse without colliding.
+                metrics.update(self.callback_handler.run(step, self, self.log_every))
+
                 history["step"].append(step)
-                history["train_nll"].append(metrics["train_nll"])
-                history["eval_mse"].append(metrics["eval_mse"])
+                for k, v in metrics.items():
+                    history.setdefault(k, []).append(v)
+
+                extra = "  ".join(
+                    f"{k}={v:.4f}" for k, v in metrics.items() if k not in ("train_nll", "eval_mse")
+                )
                 print(f"step {step:5d}  train_nll={metrics['train_nll']:.4f}  eval_mse={metrics['eval_mse']:.4f}  "
-                      f"n_train={n_train}  ({time.perf_counter() - t0:.1f}s elapsed)")
+                      f"n_train={n_train}" + (f"  {extra}" if extra else "")
+                      + f"  ({time.perf_counter() - t0:.1f}s elapsed)")
                 if self.on_log is not None:
-                    self.on_log(step, metrics)
+                    # "/"-namespaced only at this MLflow-facing boundary --
+                    # a dashboard/grouping concern, kept separate from
+                    # `metrics`/`history`'s own flat keys (which
+                    # tests/checkpoints/train_pfn.py's summary log already
+                    # depend on). Callback metrics are already namespaced by
+                    # the Callback itself, so they pass through unchanged.
+                    mlflow_metrics = {"train/nll": metrics["train_nll"], "eval/mse": metrics["eval_mse"]}
+                    mlflow_metrics.update(
+                        {k: v for k, v in metrics.items() if k not in ("train_nll", "eval_mse")}
+                    )
+                    self.on_log(step, mlflow_metrics)
 
         if self.checkpoint_path is not None:
             checkpoint_path = Path(self.checkpoint_path)
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
-                {"model_state": self.model.state_dict(), "config": self.model_config, "history": history},
+                {
+                    "model_state": self.model.state_dict(),
+                    "config": self.model_config,
+                    "history": history,
+                    **(self.extra_checkpoint_metadata or {}),
+                },
                 checkpoint_path,
             )
             print("saved checkpoint to", checkpoint_path)

@@ -96,6 +96,44 @@ def test_load_pfn_checkpoint_accepts_old_format_missing_bar_dist_keys(tmp_path):
     assert bar_dist.num_bars == 16
 
 
+def test_extra_checkpoint_metadata_round_trips_as_sibling_keys(tmp_path):
+    """Checkpoint lineage (train_pfn.py's main(): mlflow_run_id, git_commit)
+    -- PFNTrainer's own extra_checkpoint_metadata, not reachable through the
+    plain train_pfn() entry point (no MLflow run to reference there), so
+    tested directly against PFNTrainer. Must land as sibling top-level keys,
+    not merged into "config" -- that dict gets **-unpacked straight into
+    PFN(**ckpt["config"]) at load time (load_pfn_checkpoint), so anything
+    else in it would break that call with an unexpected kwarg."""
+    import torch
+
+    from anytimeacquisition.models.pfn import PFN
+    from anytimeacquisition.priors.bnn import BNNPrior
+    from anytimeacquisition.trainer.pfn_trainer import PFNTrainer
+
+    prior = BNNPrior(
+        batch_size=4, x_dim=1, seed=0,
+        ecdf_n_draws=5, ecdf_samples_per_draw=50, cache_dir=None,
+    )
+    model = PFN(max_x_dim=1, d_model=16, n_heads=2, n_layers=1, d_ff=32, n_bins=16)
+    checkpoint_path = tmp_path / "lineage_ckpt.pt"
+    trainer = PFNTrainer(
+        prior=prior, model=model, n_steps=2, n_test=4, log_every=1,
+        checkpoint_path=checkpoint_path,
+        model_config={"max_x_dim": 1, "d_model": 16, "n_heads": 2, "n_layers": 1, "d_ff": 32, "n_bins": 16},
+        extra_checkpoint_metadata={"mlflow_run_id": "abc123", "git_commit": "deadbeef"},
+    )
+    trainer.run()
+
+    ckpt = torch.load(checkpoint_path, weights_only=False)
+    assert ckpt["mlflow_run_id"] == "abc123"
+    assert ckpt["git_commit"] == "deadbeef"
+    assert "mlflow_run_id" not in ckpt["config"]
+    assert "git_commit" not in ckpt["config"]
+    # PFN(**ckpt["config"]) (load_pfn_checkpoint's own reconstruction) must
+    # still work -- the lineage keys must not have leaked into "config".
+    PFN(**ckpt["config"])
+
+
 def test_load_pfn_checkpoint_rejects_genuine_state_dict_mismatch(tmp_path):
     import pytest
     import torch

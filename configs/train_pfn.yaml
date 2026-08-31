@@ -18,3 +18,24 @@ defaults:
 seed: 0
 device: cpu
 allow_dirty: false
+
+# Own MLflow experiment -- was sharing configs/callbacks/mlflow.yaml's bare
+# "anytimeacquisition" default with configs/config.yaml's EXIT/policy loop
+# (a different pipeline entirely -- see this file's header), same gap
+# action_head_posterior_distill.yaml/explore_search_playground.yaml already
+# closed for themselves.
+callbacks:
+  mlflow:
+    experiment_name: anytimeacquisition-pfn-pretrain
+
+# Anchored to the aa_root resolver (registered by src/anytimeacquisition/paths.py,
+# import side effect of anytimeacquisition/__init__.py) rather than Hydra's
+# default cwd-relative `outputs/...` -- keeps run dirs a top-level, gitignored
+# sibling of `src/` regardless of the invocation cwd (e.g. an IDE run config
+# defaulting to the script's own directory).
+hydra:
+  run:
+    dir: ${aa_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${aa_root:}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
