@@ -87,13 +87,17 @@ correction -- a fixed-width Linear's fan-in shouldn't shrink just because
 some of its input slots are zero-padded rather than real), then zero-pad up
 to the fixed width their encoder was built for. `_pad_and_rescale_features`
 below is that same encoder, generalized from their single batch-wide
-`x.shape[-1]` to a per-batch-item `n_features` tensor, so one batch can mix
-episodes with different real x_dim -- same idea as `train_key_padding_mask`
-generalizing ifBO's own batch-wide `single_eval_position` to per-item
-`n_train`. `priors/bnn.py`'s `BNNPrior` already draws per-instance variable
-dimensionality this way (`active_dim`/`active_dim_mask`, its own
-`variable_dim_min` option) — `PFNTrainer` passes that straight through as
-`n_features`.
+`x.shape[-1]` to a per-batch-item `n_features` tensor, so a batch *could*
+mix episodes with different real x_dim -- same idea as
+`train_key_padding_mask` generalizing ifBO's own batch-wide
+`single_eval_position` to per-item `n_train`. That per-item generality
+isn't currently exercised by training, though: `priors/bnn.py`'s
+`BNNPrior` (its `active_dim`/`active_dim_mask`, `variable_dim_min` option)
+deliberately draws one **batch-uniform** active_dim, resampled fresh every
+step -- matching ifBO/PFNs4BO's own batch-level convention instead, after
+an earlier per-instance version was reverted (2026-08-31, see
+`docs/log/2026-08-31-variable-xdim-training-stagnation.md`) -- `PFNTrainer`
+passes that batch-uniform value straight through as `n_features`.
 """
 import torch
 import torch.nn as nn
@@ -321,8 +325,10 @@ if __name__ == "__main__":
 
     # Variable x_dim via n_features: a model built at max_x_dim=4 accepting
     # episodes that actually only use 2 real dims, with item 1 using even
-    # fewer (1) than item 0 (2) -- per-instance, like BNNPrior's own
-    # active_dim/active_dim_mask (see module docstring).
+    # fewer (1) than item 0 (2) -- a genuinely per-instance n_features
+    # tensor, which the model supports even though BNNPrior/PFNTrainer
+    # don't currently exercise it that way (they use one batch-uniform
+    # active_dim instead, see module docstring).
     max_x_dim = 4
     var_model = PFN(max_x_dim=max_x_dim, d_model=32, n_heads=4, n_layers=2, d_ff=64, n_bins=16)
     x_dim_actual = 2

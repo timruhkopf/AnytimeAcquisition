@@ -97,21 +97,25 @@ class BNNPrior:
         # than a single fixed x_dim, matching PFNs4BO's
         # sample_num_feaetures_get_batch (docs/log/). None (default): every
         # instance uses the full x_dim, i.e. today's behavior, unchanged.
-        # Set e.g. 1: each instance independently samples
-        # active_dim ~ randint(variable_dim_min, x_dim+1) at reset() -- the
-        # PFN still sees a fixed-size x_dim-wide input, but dims beyond
-        # active_dim are zeroed (both the weight, via relevant_mask, and the
-        # value, in sample_episode below), the fan-in scaling in
-        # _raw_forward divides by sqrt(active_dim) not sqrt(x_dim), and
-        # nothing downstream needs to know the count explicitly -- "zero"
-        # already means "not part of this task." Per-instance (every
-        # instance in a batch can have a different active_dim), not
-        # per-batch like PFNs4BO's version -- more information-dense per
-        # training step given we already vectorize per-instance elsewhere.
-        # Not used anywhere yet -- M2 currently trains on one fixed x_dim
-        # deliberately (simpler pipeline); this is the capability to switch
-        # that on later, before real-world benchmarks need a single PFN to
-        # generalize across dimensionalities. See docs/milestones/M2.md.
+        # Set e.g. 1: the whole batch shares one
+        # active_dim ~ randint(variable_dim_min, x_dim+1), resampled fresh
+        # every reset() (i.e. every training step) -- the PFN still sees a
+        # fixed-size x_dim-wide input, but dims beyond active_dim are zeroed
+        # (both the weight, via relevant_mask, and the value, in
+        # sample_episode below), the fan-in scaling in _raw_forward divides
+        # by sqrt(active_dim) not sqrt(x_dim), and nothing downstream needs
+        # to know the count explicitly -- "zero" already means "not part of
+        # this task." Batch-uniform (every instance in one reset() shares
+        # the same active_dim), matching PFNs4BO/ifBO's own convention --
+        # NOT per-instance: an earlier version sampled a distinct active_dim
+        # per instance, reverted 2026-08-31 after a training run using it
+        # stagnated and underperformed fixed-dim ("marginal") models; the
+        # working hypothesis is that mixing differently-scaled instances
+        # into the same batch/gradient step made optimization noisier than
+        # necessary, on top of the genuine harder-in-high-dim signal you'd
+        # expect either way -- see
+        # docs/log/2026-08-31-variable-xdim-training-stagnation.md (not
+        # confirmed via a controlled rerun yet).
         variable_dim_min: int | None = None,
         ecdf_n_samples: int = 1000,
         # ECDF-fit cost scales with n_draws * samples_per_draw (each draw is
@@ -194,8 +198,19 @@ class BNNPrior:
         # relevant_mask below. Disabled (variable_dim_min=None) -> active_dim
         # is always the full x_dim, active_dim_mask is all-ones, byte-
         # identical to not having this feature at all.
+        #
+        # Batch-uniform, not per-instance: one active_dim shared by all B
+        # instances in this reset() (still resampled fresh every reset(),
+        # i.e. every training step -- matches how n_train is already
+        # resampled per step). An earlier version sampled a distinct
+        # active_dim per instance; reverted 2026-08-31 -- see
+        # docs/log/2026-08-31-variable-xdim-training-stagnation.md, matching
+        # ifBO/PFNs4BO's own batch-level convention instead (their whole
+        # batch shares one num_features per step) rather than mixing
+        # differently-scaled instances into the same batch/gradient step.
         if self.variable_dim_min is not None:
-            self.active_dim = torch.randint(self.variable_dim_min, d + 1, (B,), device=dev, generator=gen)
+            active_dim_scalar = torch.randint(self.variable_dim_min, d + 1, (1,), device=dev, generator=gen)
+            self.active_dim = active_dim_scalar.expand(B).clone()
         else:
             self.active_dim = torch.full((B,), d, device=dev, dtype=torch.long)
         dim_idx = torch.arange(d, device=dev).unsqueeze(0).expand(B, -1)
@@ -244,13 +259,13 @@ class BNNPrior:
 
         # Fan-in-aware input scaling: z-score a Uniform(0,1) input (mean .5,
         # std sqrt(1/12)) then divide by sqrt(active_dim) -- the number of
-        # dims actually feeding the first layer for THIS instance, not the
-        # tensor's structural width -- so first-layer preactivation variance
-        # doesn't grow with x_dim. Matches PFNs4BO's sample_input() +
-        # get_batch()'s `x_ / sqrt(num_features)`; active_dim generalizes it
-        # to per-instance variable dimensionality (variable_dim_min above).
-        # active_dim == d for every instance when that's disabled, so this
-        # is exactly the old `/ sqrt(d)` in that case.
+        # dims actually feeding the first layer this step, not the tensor's
+        # structural width -- so first-layer preactivation variance doesn't
+        # grow with x_dim. Matches PFNs4BO's sample_input() + get_batch()'s
+        # `x_ / sqrt(num_features)`; active_dim generalizes it to variable
+        # dimensionality (variable_dim_min above, batch-uniform -- see that
+        # comment). active_dim == d for every instance when that's disabled,
+        # so this is exactly the old `/ sqrt(d)` in that case.
         x_scaled = (x - 0.5) / math.sqrt(1 / 12) / self.active_dim.float().clamp(min=1).sqrt().view(B, 1, 1)
 
         pre = torch.einsum("bnd,bdw->bnw", x_scaled, self.W_in) + self.b_in.unsqueeze(1)

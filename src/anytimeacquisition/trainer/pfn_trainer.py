@@ -132,10 +132,11 @@ class PFNTrainer:
             x_tr, y_tr, x_te, y_te = self.prior.sample_episode(n_train, self.n_test)
 
             with torch.amp.autocast(device_type=device_type, enabled=use_amp):
-                # prior.active_dim: [B] -- BNNPrior's own per-instance real
-                # feature count (torch.full((B,), x_dim) i.e. a no-op unless
-                # priors.variable_dim_min is set, see priors/bnn.py), passed
-                # straight through as the PFN's n_features (models/pfn.py).
+                # prior.active_dim: [B] -- BNNPrior's own batch-uniform real
+                # feature count this step (torch.full((B,), x_dim) i.e. a
+                # no-op unless priors.variable_dim_min is set, see
+                # priors/bnn.py), passed straight through as the PFN's
+                # n_features (models/pfn.py).
                 logits = self.model(x_tr, y_tr, x_te, n_features=self.prior.active_dim)
                 loss = self.bar_dist(logits, y_te).mean()
 

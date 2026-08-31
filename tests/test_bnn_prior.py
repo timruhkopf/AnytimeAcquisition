@@ -95,9 +95,22 @@ def test_variable_dim_active_dim_in_range():
     prior = _make_prior(variable_dim_min=1)
     assert (prior.active_dim >= 1).all()
     assert (prior.active_dim <= 3).all()
-    # sanity: with B=4 instances sampling uniformly over {1,2,3}, not every
-    # instance landing on the same value is overwhelmingly likely
-    assert prior.active_dim.unique().numel() > 1
+    # Batch-uniform, not per-instance (2026-08-31, see
+    # docs/log/2026-08-31-variable-xdim-training-stagnation.md): every
+    # instance in ONE reset() shares the same active_dim.
+    assert prior.active_dim.unique().numel() == 1
+
+
+def test_variable_dim_active_dim_varies_step_to_step():
+    prior = _make_prior(variable_dim_min=1)
+    seen = set()
+    for _ in range(20):
+        prior.reset()
+        seen.add(prior.active_dim[0].item())
+    # sanity: with reset() resampling uniformly over {1,2,3} every step,
+    # never seeing more than one value in 20 resets is overwhelmingly
+    # unlikely -- this is the axis active_dim is now allowed to vary on.
+    assert len(seen) > 1
 
 
 def test_variable_dim_zeros_x_beyond_active_dim():

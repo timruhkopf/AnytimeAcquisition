@@ -22,8 +22,11 @@ frac_relevant_features: 0.7
 # Train across a distribution of dimensionalities instead of one fixed
 # x_dim -- see bnn.py's constructor comment; models/pfn.py's PFN.forward
 # n_features (see that module's docstring) consumes the resulting
-# per-instance active_dim straight through PFNTrainer, so turning this on
-# is now a one-line config change, not a pipeline change. Left off (null)
+# batch-uniform active_dim straight through PFNTrainer (one active_dim per
+# training step, resampled fresh every step -- matches ifBO/PFNs4BO's own
+# convention; NOT per-instance, see docs/log/2026-08-31-variable-xdim-
+# training-stagnation.md for why that was reverted), so turning this on is
+# a one-line config change, not a pipeline change. Left off (null)
 # deliberately for now (M2's own experiment configs train on a single known
 # x_dim to keep those specific runs simple); see
 # configs/experiment/pfn_variable_xdim_smoke.yaml for turning it on. Flip on

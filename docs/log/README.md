@@ -29,6 +29,7 @@ first.
 ## Index
 
 <!-- newest first — add new entries above this line -->
+- [2026-08-31 — Variable-x_dim PFN training stagnated with per-instance active_dim — reverted to batch-uniform (ifBO-style)](2026-08-31-variable-xdim-training-stagnation.md)
 - [2026-08-28 — Exploit-search targets may be more privileged than the state can justify](2026-08-28-exploit-search-target-may-outrun-context.md)
 - [2026-08-28 — Explore-branch search: from a self-referential entropy objective to teacher-forced, privileged-NLL gradient descent](2026-08-28-explore-search-input-optimization-and-teacher-forcing.md)
 - [2026-08-28 — Why pi0/pi0.5 use separate expert weights + a fine-tuned backbone, and why the ActionHead deliberately differs (frozen PFN)](2026-08-28-pi0-moe-and-frozen-vs-finetuned-backbone.md)
