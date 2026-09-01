@@ -17,7 +17,7 @@ trainer:
     n_restarts: 6
     n_steps: 15
   explore_search_kwargs:
-    n_restarts: 6
+    n_restarts: 1
     n_steps: 15
 
 build_interesting_points_kwargs:

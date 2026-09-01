@@ -47,6 +47,8 @@ def build_auc_eval_callback(
     eval_seed: int = 999,
     prior_kwargs: dict | None = None,
     ei_kwargs: dict | None = None,
+    n_random_restarts: int = 5,
+    n_ei_restarts: int = 3,
     log_figure: bool = True,
     every_n_steps: int | None = None,
 ) -> Callback:
@@ -55,19 +57,45 @@ def build_auc_eval_callback(
     (`action_head_policy_fn(trainer.action_head, trainer.pfn, n_steps,
     sample=False)`) vs. two baselines -- `random_policy` and the already-
     built GP+EI baseline (`models.baselines.gp_acquisition.gp_acquisition_policy`,
-    already a drop-in `policy_fn`) -- all three rolled out against fresh
-    `BNNPrior(seed=eval_seed, ...)` instances (same seed for all three, so
-    they're compared on the literal same underlying BNN draws, not just the
-    same distribution -- see module docstring).
+    already a drop-in `policy_fn`).
 
-    Reports `auc/action_head`, `auc/random`, `auc/ei` (metric-type-first,
-    one chart groups all three) at the *outer* training-step cadence. Also
-    logs a small comparison figure (mean log-incumbent per rollout step,
-    one line per policy) via `mlflow.log_figure` at the same cadence --
-    that's a genuinely different x-axis (rollout step, not training step)
-    that doesn't belong forced into a scalar `mlflow.log_metric` series (see
-    the plan addendum this was built from) -- an MLflow *artifact*, so it's
-    a no-op (not an error) when there's no active run, e.g. under test.
+    `random`/`ei` are true, fixed **reference lines**, computed ONCE
+    (memoized in this closure on the first call) and re-emitted unchanged
+    on every subsequent call -- not recomputed per training step. This
+    matters for two reasons: (1) both policies are entirely independent of
+    the ActionHead being trained (random ignores context, EI only reads
+    the held-out rollout's own observations), so their performance on a
+    FIXED held-out instance set genuinely never changes -- recomputing them
+    every tick would just add re-evaluation noise (random_policy's own
+    draws, `optimize_acqf`'s own multistart randomness) around a constant
+    true value, not track anything real; (2) it's strictly cheaper -- EI's
+    per-restart cost (an independent GP fit + acqf optimization per
+    instance per step) is only ever paid once for the whole training run,
+    not once per eval tick. Each baseline is itself averaged over
+    `n_random_restarts`/`n_ei_restarts` independent rollouts against the
+    *exact same* held-out instance(s) (`rollout_episode(..., reset=False)`,
+    reusing one `prior.reset()` -- see `trainer/exit_rollout.py`) before
+    being cached, for a low-variance reference value -- `n_ei_restarts`
+    defaults lower than `n_random_restarts` since EI is far more expensive
+    per restart. Only `action_head`'s own rollout is genuinely re-evaluated
+    every call (its weights are what's actually changing).
+
+    Reports `auc/action_head` (fresh every call), `auc/random`, `auc/ei`
+    (memoized -- render as flat/horizontal lines on any MLflow chart
+    grouping "auc/*", since the logged value literally never changes),
+    plus a paired per-instance improvement of action_head over the
+    (restart-averaged) random baseline --
+    `auc_improvement_vs_random/{mean,std,mean_minus_std,mean_plus_std}`
+    (positive == action_head beats random; the `mean_minus_std`/
+    `mean_plus_std` pair is the MLflow-native way to approximate a
+    mean+-1std band, since MLflow metrics are scalar-only) -- at the
+    *outer* training-step cadence. Also logs a small comparison figure
+    (mean log-incumbent per rollout step, one line per policy) via
+    `mlflow.log_figure` at the same cadence -- that's a genuinely
+    different x-axis (rollout step, not training step) that doesn't
+    belong forced into a scalar `mlflow.log_metric` series (see the plan
+    addendum this was built from) -- an MLflow *artifact*, so it's a
+    no-op (not an error) when there's no active run, e.g. under test.
 
     Deliberately ONE fixed `x_dim` (the PFN's own `max_x_dim`), not a swept
     list like `dim_validation.py` -- avoids per-dimension metric-name bloat
@@ -75,20 +103,68 @@ def build_auc_eval_callback(
     comparison, not a dimensionality sweep.
     """
     ei_kwargs = ei_kwargs or {}
+    baseline_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def _compute_baseline(policy_fn, n_restarts: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """-> (per_instance_auc [eval_batch_size], mean_log_incumbent_curve
+        [n_steps]), averaged over n_restarts independent rollouts against
+        one reset() of a fresh held-out prior."""
+        prior = _held_out_prior(x_dim, eval_batch_size, eval_seed, prior_kwargs)
+        prior.reset()
+        aucs, curves = [], []
+        for _ in range(n_restarts):
+            rollout = rollout_episode(prior, n_init, n_steps, policy_fn=policy_fn, reset=False)
+            y = rollout["y_context"][:, n_init:]  # policy-chosen steps only, matching n_steps
+            aucs.append(log_incumbent_auc(y))
+            curves.append(torch.log(incumbent_trajectory(y).clamp_min(1e-12)).mean(dim=0))
+        return torch.stack(aucs).mean(dim=0), torch.stack(curves).mean(dim=0)
 
     def probe(step: int, trainer: Any) -> dict:
-        policies = {
-            "action_head": action_head_policy_fn(trainer.action_head, trainer.pfn, n_steps, sample=False),
-            "random": random_policy,
-            "ei": partial(gp_acquisition_policy, acquisition="EI", **ei_kwargs),
-        }
-        curves, metrics = {}, {}
-        for name, policy_fn in policies.items():
-            prior = _held_out_prior(x_dim, eval_batch_size, eval_seed, prior_kwargs)
-            rollout = rollout_episode(prior, n_init, n_steps, policy_fn=policy_fn)
-            y = rollout["y_context"][:, n_init:]  # policy-chosen steps only, matching n_steps
-            metrics[f"auc/{name}"] = log_incumbent_auc(y).mean().item()
-            curves[name] = torch.log(incumbent_trajectory(y).clamp_min(1e-12)).mean(dim=0)  # [n_steps]
+        if not baseline_cache:
+            baseline_cache["random"] = _compute_baseline(random_policy, n_random_restarts)
+            baseline_cache["ei"] = _compute_baseline(
+                partial(gp_acquisition_policy, acquisition="EI", **ei_kwargs), n_ei_restarts,
+            )
+
+        prior = _held_out_prior(x_dim, eval_batch_size, eval_seed, prior_kwargs)
+        rollout = rollout_episode(
+            prior, n_init, n_steps,
+            policy_fn=action_head_policy_fn(trainer.action_head, trainer.pfn, n_steps, sample=False),
+        )
+        y = rollout["y_context"][:, n_init:]
+        auc_action_head = log_incumbent_auc(y)  # [eval_batch_size]
+        curve_action_head = torch.log(incumbent_trajectory(y).clamp_min(1e-12)).mean(dim=0)
+
+        metrics = {"auc/action_head": auc_action_head.mean().item()}
+        curves = {"action_head": curve_action_head}
+        for name in ("random", "ei"):
+            per_instance_auc, curve = baseline_cache[name]
+            metrics[f"auc/{name}"] = per_instance_auc.mean().item()
+            curves[name] = curve
+
+        # Paired per-instance improvement over the (restart-averaged, fixed)
+        # random baseline -- action_head and random share the exact same
+        # eval_seed, so index b is the literal same BNN instance in both,
+        # making this a true paired comparison, not just a difference of
+        # two independent batch means. `log_incumbent_auc` is lower-is-
+        # better, so this is flipped (random - action_head) to make
+        # positive == "beats random". `mean` is mathematically identical to
+        # `auc/random - auc/action_head` above (linear reduction over the
+        # same index set) -- logged anyway for dashboard convenience. `std`
+        # is the genuinely new information: how *consistently* action_head
+        # beats random across different held-out instances, not visible
+        # from the two separate means alone. MLflow metrics are scalars
+        # only (no native shaded-uncertainty-band widget) --
+        # `mean_minus_std`/`mean_plus_std` under the same
+        # "auc_improvement_vs_random/" prefix is the standard workaround:
+        # three overlaid scalar traces on one chart approximate a mean+-1std
+        # band without logging any extra plot/figure.
+        improvement = baseline_cache["random"][0] - auc_action_head  # [eval_batch_size]
+        imp_mean, imp_std = improvement.mean(), improvement.std()
+        metrics["auc_improvement_vs_random/mean"] = imp_mean.item()
+        metrics["auc_improvement_vs_random/std"] = imp_std.item()
+        metrics["auc_improvement_vs_random/mean_minus_std"] = (imp_mean - imp_std).item()
+        metrics["auc_improvement_vs_random/mean_plus_std"] = (imp_mean + imp_std).item()
 
         if log_figure and mlflow.active_run() is not None:
             import matplotlib.pyplot as plt
@@ -222,9 +298,10 @@ def build_explore_signal_rate_callback(
             step_mask = is_explore[:, step_idx]
             if not step_mask.any():
                 continue
+            x_realized = rollout["x_context"][:, n_init + step_idx, :]
             _, _, has_signal = explore_search(
                 prior, trainer.pfn, trainer.bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"],
-                **trainer.explore_search_kwargs,
+                x_realized, **trainer.explore_search_kwargs,
             )
             n_explore_labeled += int(step_mask.sum().item())
             n_with_signal += int((step_mask & has_signal).sum().item())

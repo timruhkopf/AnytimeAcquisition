@@ -8,15 +8,22 @@ builds. Same `_target_`-instantiable shape as `PFNTrainer`
 config-driven hyperparameter on `self`, `run()` takes no arguments.
 
 Scope, per the M5 plan (see docs/log/ and the plan this trainer was built
-from): **round-0 only, no DAgger iteration** -- every rollout here uses
-`trainer.exit_rollout.random_policy` (matching "learn to exploit/explore
-from a random trajectory"); re-rolling out under the ActionHead being
-trained and repeating is a separate, not-yet-built milestone. **No
-persistent replay buffer across rollouts** -- each freshly-sampled
-rollout's examples are grouped by step (same context length within a
-step, no padding needed), trained on immediately via one optimizer step
-per rollout (loss summed across all of that rollout's examples, not one
-step per step-group), then discarded.
+from): **round-0 only by default, DAgger-style rollout mixing available,
+opt-in** (`dagger_decay_rounds`, 2026-09-01) -- with it unset, every
+rollout uses `trainer.exit_rollout.random_policy` (matching "learn to
+exploit/explore from a random trajectory"); with it set, rollouts mix in
+the ActionHead's own (stochastic) behavior via a linearly-decaying `beta`,
+per `trainer.exit_rollout.mixed_policy_fn`. **Still no persistent replay
+buffer across rollouts, deliberately** -- every rollout draws a brand-new
+BNN instance regardless of which policy generates it, so an old buffer
+entry's context would reflect an earlier, less-trained rollout policy's
+behavior on a task nobody will ever see again; each round's oracle labels
+stay computed fresh, against that round's own context and `x_int`
+selection, then discarded, same as before. Each freshly-sampled rollout's
+examples are grouped by step (same context length within a step, no
+padding needed), trained on immediately via one optimizer step per
+rollout (loss summed across all of that rollout's examples, not one step
+per step-group), then discarded.
 
 `branches: list[str]` (subset of `["exploit", "explore"]`) selects which
 oracle(s) label this rollout's examples -- `["exploit"]`/`["explore"]` give
@@ -36,14 +43,17 @@ from typing import Callable
 import torch
 
 from anytimeacquisition.callbacks.handler import Callback, CallbackHandler
-from anytimeacquisition.models.action_head import ActionHead, build_rollout_aux_features, beta_mode
+from anytimeacquisition.models.action_head import ActionHead, action_head_policy_fn, build_rollout_aux_features, beta_mode
 from anytimeacquisition.models.bar_distribution import BarDistribution
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.priors.bnn import BNNPrior
+from anytimeacquisition.search.explore import improvement_weights
 from anytimeacquisition.trainer.exit_rollout import (
     ImitationExample,
     build_exploit_buffer,
     build_explore_buffer,
+    label_branches,
+    mixed_policy_fn,
     random_policy,
     rollout_episode,
 )
@@ -77,6 +87,54 @@ class ActionHeadImitationTrainer:
         explore_search_kwargs: dict | None = None,
         build_interesting_points_kwargs: dict | None = None,
         train_value_head: bool = False,
+        # DAgger-style rollout policy (2026-09-01): None (default) keeps
+        # round-0-only behavior -- every rollout uses random_policy,
+        # unchanged. Set dagger_decay_rounds to phase in the ActionHead's
+        # own (stochastic, sample=True) rollout behavior instead, mixed
+        # per-instance against random_policy via a linearly-decaying beta
+        # (trainer.exit_rollout.mixed_policy_fn): beta(round) =
+        # max(dagger_beta_min, 1 - round/dagger_decay_rounds). Deliberately
+        # NO persistent replay buffer alongside this -- every rollout still
+        # draws a brand-new BNN instance (never revisited), so an old
+        # buffer entry's context reflects an earlier, less-trained
+        # rollout policy's behavior on a task nobody will ever see again;
+        # each round's oracle labels are always computed fresh, against
+        # that round's own context and x_int selection, then discarded
+        # (same as before) -- see docs/log/ for the fuller reasoning.
+        dagger_decay_rounds: int | None = None,
+        dagger_beta_min: float = 0.05,
+        # Explore-step subsampling (2026-09-01, compute-cost finding: a
+        # real-scale (x_dim=6) rollout showed explore-labeled steps
+        # vastly outnumbering exploit-labeled ones -- ~600 vs ~20 examples
+        # per rollout -- making explore_search's PFN forward/backward the
+        # dominant cost, ~2.3min/rollout at n_steps=40). None (default):
+        # every explore-labeled step gets a target, unchanged. Set to an
+        # int to randomly select at most that many DISTINCT STEP INDICES
+        # (not instances) per rollout to actually run explore_search on --
+        # cuts the number of explore_search calls (and their GD-step-count
+        # x PFN forward/backward cost) roughly proportionally; the
+        # unselected steps' explore-labeled instances simply get no
+        # training example this rollout (0 loss contribution), same
+        # skip-not-fabricate treatment as has_signal=False already gets.
+        max_explore_steps_per_rollout: int | None = None,
+        # If True (and max_explore_steps_per_rollout actually drops some
+        # steps), those unselected steps' flat instances get an EXPLOIT
+        # target instead of nothing -- exploit_search is far cheaper
+        # (only touches prior.evaluate, no PFN forward/backward at all),
+        # so this is close to free extra signal, not a new cost driver.
+        # Semantically sound, not just convenient: exploit_search finds a
+        # locally-better point given the CURRENT context regardless of
+        # whether THIS trajectory's last step happened to already realize
+        # an improvement -- label_branches is a which-oracle-to-consult
+        # routing choice, not a claim the exploit oracle is only valid at
+        # naturally-improving steps (see build_exploit_buffer's
+        # `require_exploit_label` docstring). Never creates a second,
+        # conflicting target for an instance that already got one this
+        # step (filler only applies to steps NOT selected for explore,
+        # and only to instances NOT already exploit-labeled there) --
+        # False by default, opt-in for ablation against the plain
+        # subsampling-only behavior.
+        fill_unselected_explore_steps_with_exploit: bool = False,
         checkpoint_path: str | Path | None = None,
         model_config: dict | None = None,
         on_log: Callable[[int, dict], None] | None = None,
@@ -104,26 +162,64 @@ class ActionHeadImitationTrainer:
         self.explore_search_kwargs = explore_search_kwargs or {}
         self.build_interesting_points_kwargs = build_interesting_points_kwargs
         self.train_value_head = train_value_head
+        self.dagger_decay_rounds = dagger_decay_rounds
+        self.dagger_beta_min = dagger_beta_min
+        self.max_explore_steps_per_rollout = max_explore_steps_per_rollout
+        self.fill_unselected_explore_steps_with_exploit = fill_unselected_explore_steps_with_exploit
         self.checkpoint_path = checkpoint_path
         self.model_config = model_config
         self.on_log = on_log
         self.extra_checkpoint_metadata = extra_checkpoint_metadata
         self.callback_handler = CallbackHandler(callbacks)
 
-    def _collect_examples(self, rollout: dict) -> list[ImitationExample]:
+    def _collect_examples(self, rollout: dict) -> tuple[list[ImitationExample], dict]:
+        """-> (examples, extra_metrics). `extra_metrics` carries this
+        rollout's subsampling/filler bookkeeping (`explore/signal_rate_train`,
+        `n_examples/exploit_filler`) -- computed here since this is the one
+        place that already has the per-step eligible/selected/unselected
+        step sets in hand."""
         examples: list[ImitationExample] = []
+        extra: dict = {}
+
         if "exploit" in self.branches:
             examples += build_exploit_buffer(self.prior, rollout, self.n_init, self.exploit_search_kwargs)
-        if "explore" in self.branches:
-            examples += build_explore_buffer(
-                self.prior, self.pfn, self.bar_dist, rollout, self.n_init, self.explore_search_kwargs,
-            )
-        return examples
 
-    def _step_loss(self, step: int, rollout: dict, step_examples: list[ImitationExample]) -> tuple[torch.Tensor, dict]:
+        if "explore" in self.branches:
+            is_explore = ~label_branches(rollout["y_context"], self.n_init)  # [B, n_steps]
+            eligible = [s for s in range(self.n_steps) if is_explore[:, s].any()]
+
+            if self.max_explore_steps_per_rollout is not None and len(eligible) > self.max_explore_steps_per_rollout:
+                perm = torch.randperm(len(eligible))[: self.max_explore_steps_per_rollout]
+                selected = {eligible[i] for i in perm.tolist()}
+            else:
+                selected = set(eligible)
+            unselected = set(eligible) - selected
+
+            explore_examples = build_explore_buffer(
+                self.prior, self.pfn, self.bar_dist, rollout, self.n_init, self.explore_search_kwargs,
+                steps=selected if self.max_explore_steps_per_rollout is not None else None,
+            )
+            examples += explore_examples
+            n_eligible_selected = sum(int(is_explore[:, s].sum().item()) for s in selected)
+            extra["explore/signal_rate_train"] = (
+                len(explore_examples) / n_eligible_selected if n_eligible_selected else float("nan")
+            )
+
+            if "exploit" in self.branches and self.fill_unselected_explore_steps_with_exploit and unselected:
+                filler = build_exploit_buffer(
+                    self.prior, rollout, self.n_init, self.exploit_search_kwargs,
+                    steps=unselected, require_exploit_label=False,
+                )
+                examples += filler
+                extra["n_examples/exploit_filler"] = float(len(filler))
+
+        return examples, extra
+
+    def _step_loss(self, step: int, rollout: dict, step_examples: list[ImitationExample]) -> tuple[torch.Tensor, dict, dict]:
         """One step-group's worth of examples (same context length within
         a rollout step -> stackable with no padding). -> (loss summed over
-        this group, {"exploit": n, "explore": n} loss sums for logging)."""
+        this group, {"exploit": n, "explore": n} loss sums for logging,
+        diagnostic sums for policy/beta_entropy + exploit/target_distance)."""
         x_context = torch.stack([ex.x_context for ex in step_examples])
         y_context = torch.stack([ex.y_context for ex in step_examples])
         x_star = torch.stack([ex.x_star for ex in step_examples])
@@ -134,6 +230,28 @@ class ActionHeadImitationTrainer:
         out = self.action_head(self.pfn, x_context, y_context, aux, blind=False)
         per_example_nll = _beta_nll_loss(out["alpha"], out["beta"], x_star)
 
+        # policy/beta_entropy: mean entropy of the predicted per-dimension
+        # Beta distributions -- a standard BC/policy diagnostic that's
+        # otherwise entirely invisible: detects premature collapse to
+        # overconfident point predictions, or a policy that stays
+        # uselessly close to uniform throughout training.
+        entropy_sum = torch.distributions.Beta(out["alpha"], out["beta"]).entropy().sum()
+
+        # exploit/target_distance: mean L2 distance between x_star and the
+        # incumbent it was seeded from, for exploit-branch examples in this
+        # group only -- confirms the incumbent-seeded, local-only redesign
+        # (2026-09-01) is actually staying local, not drifting back toward
+        # the "target may outrun context" failure mode
+        # (docs/log/2026-08-28-exploit-search-target-may-outrun-context.md).
+        target_distance_sum = torch.zeros(())
+        n_exploit_examples = 0
+        for i, ex in enumerate(step_examples):
+            if ex.branch != "exploit":
+                continue
+            incumbent_x = ex.x_context[ex.y_context.argmin()]
+            target_distance_sum = target_distance_sum + (ex.x_star - incumbent_x).norm()
+            n_exploit_examples += 1
+
         branch_sums = {"exploit": torch.zeros(()), "explore": torch.zeros(())}
         for i, ex in enumerate(step_examples):
             branch_sums[ex.branch] = branch_sums[ex.branch] + per_example_nll[i]
@@ -143,7 +261,42 @@ class ActionHeadImitationTrainer:
             y_star = torch.stack([ex.y_star for ex in step_examples])
             loss = loss + torch.nn.functional.mse_loss(out["value"], y_star, reduction="sum")
 
-        return loss, branch_sums
+        # explore/weighted_nll_reduction: how much the oracle correction
+        # actually reduced the weighted NLL at x_int vs. doing nothing
+        # (weighted_before - ex.y_star, ex.y_star already IS the achieved
+        # "after" value from search.explore.explore_search) -- unlike
+        # exploit_search, explore_search has no incumbent-style fallback
+        # guarantee (see its own module docstring: "no privileged known-
+        # good x to fall back to here"), so this can occasionally be small
+        # or negative -- worth surfacing directly, not assuming it's
+        # always positive. One batched extra PFN forward pass per
+        # step-group (all this step's explore examples at once), not one
+        # per example -- same idiom `search/explore.py`'s own `__main__`
+        # demo uses to compute the "before" value.
+        explore_reduction_sum = torch.zeros(())
+        n_explore_examples = 0
+        explore_idx = [i for i, ex in enumerate(step_examples) if ex.branch == "explore"]
+        if explore_idx and "x_int" in rollout:
+            explore_examples = [step_examples[i] for i in explore_idx]
+            x_int_b = torch.stack([rollout["x_int"][ex.instance_idx] for ex in explore_examples])
+            y_int_true_b = torch.stack([rollout["y_int_true"][ex.instance_idx] for ex in explore_examples])
+            x_ctx_b = torch.stack([ex.x_context for ex in explore_examples])
+            y_ctx_b = torch.stack([ex.y_context for ex in explore_examples])
+            incumbent_b = y_ctx_b.min(dim=1).values
+            weights_b = improvement_weights(incumbent_b, y_int_true_b)
+            with torch.no_grad():
+                nll_before = self.bar_dist(self.pfn(x_ctx_b, y_ctx_b, x_int_b), y_int_true_b)
+                weighted_before = (weights_b * nll_before).sum(dim=-1)  # [n_explore_examples]
+            y_star_b = torch.stack([ex.y_star for ex in explore_examples])
+            explore_reduction_sum = (weighted_before - y_star_b).sum()
+            n_explore_examples = len(explore_examples)
+
+        diagnostics = {
+            "entropy_sum": entropy_sum, "entropy_count": len(step_examples) * self.action_head.x_dim,
+            "target_distance_sum": target_distance_sum, "n_exploit_examples": n_exploit_examples,
+            "explore_reduction_sum": explore_reduction_sum, "n_explore_examples": n_explore_examples,
+        }
+        return loss, branch_sums, diagnostics
 
     def run(self) -> dict:
         # BNNPrior owns its own seeded generator (self.prior's own `seed`
@@ -160,11 +313,30 @@ class ActionHeadImitationTrainer:
 
         for rollout_idx in range(self.n_rollouts):
             build_ip_kwargs = self.build_interesting_points_kwargs if "explore" in self.branches else None
+
+            usage_counter = None
+            if self.dagger_decay_rounds is not None:
+                beta = max(self.dagger_beta_min, 1.0 - rollout_idx / self.dagger_decay_rounds)
+                usage_counter = {}
+                # Fresh action_head_policy_fn every rollout: it tracks its
+                # own step counter via closure state, which must start at 0
+                # for each new episode (see models/action_head.py).
+                # sample=True keeps the self-generated fraction stochastic,
+                # not a greedy beta_mode -- avoids collapsing early
+                # self-play into narrow, repetitive trajectories.
+                policy_fn = mixed_policy_fn(
+                    action_head_policy_fn(self.action_head, self.pfn, self.n_steps, sample=True),
+                    random_policy, beta, usage_counter=usage_counter,
+                )
+            else:
+                beta = 1.0  # logged for consistency; round-0-only behavior is beta=1 (always random) throughout
+                policy_fn = random_policy
+
             rollout = rollout_episode(
-                self.prior, self.n_init, self.n_steps, policy_fn=random_policy,
+                self.prior, self.n_init, self.n_steps, policy_fn=policy_fn,
                 build_interesting_points_kwargs=build_ip_kwargs,
             )
-            examples = self._collect_examples(rollout)
+            examples, extra_metrics = self._collect_examples(rollout)
             n_exploit = sum(ex.branch == "exploit" for ex in examples)
             n_explore = sum(ex.branch == "explore" for ex in examples)
 
@@ -174,16 +346,30 @@ class ActionHeadImitationTrainer:
 
             total_loss = torch.zeros(())
             branch_totals = {"exploit": torch.zeros(()), "explore": torch.zeros(())}
+            entropy_sum, entropy_count = torch.zeros(()), 0
+            target_distance_sum, n_exploit_examples = torch.zeros(()), 0
+            explore_reduction_sum, n_explore_examples = torch.zeros(()), 0
             for step, step_examples in by_step.items():
-                step_loss, branch_sums = self._step_loss(step, rollout, step_examples)
+                step_loss, branch_sums, diag = self._step_loss(step, rollout, step_examples)
                 total_loss = total_loss + step_loss
                 for k, v in branch_sums.items():
                     branch_totals[k] = branch_totals[k] + v
+                entropy_sum = entropy_sum + diag["entropy_sum"]
+                entropy_count += diag["entropy_count"]
+                target_distance_sum = target_distance_sum + diag["target_distance_sum"]
+                n_exploit_examples += diag["n_exploit_examples"]
+                explore_reduction_sum = explore_reduction_sum + diag["explore_reduction_sum"]
+                n_explore_examples += diag["n_explore_examples"]
 
             if by_step:
                 opt.zero_grad()
                 total_loss.backward()
+                grad_norm = torch.sqrt(sum(
+                    p.grad.detach().square().sum() for p in self.action_head.parameters() if p.grad is not None
+                ))
                 opt.step()
+            else:
+                grad_norm = None
 
             if rollout_idx % self.log_every == 0 or rollout_idx == self.n_rollouts - 1:
                 n_examples = max(len(examples), 1)
@@ -191,7 +377,21 @@ class ActionHeadImitationTrainer:
                     "policy_nll/train": total_loss.item() / n_examples,
                     "n_examples/exploit": float(n_exploit),
                     "n_examples/explore": float(n_explore),
+                    "dagger/beta": beta,
+                    "policy/beta_entropy": (entropy_sum.item() / entropy_count) if entropy_count else float("nan"),
                 }
+                if grad_norm is not None:
+                    metrics["grad_norm/action_head"] = grad_norm.item()
+                if n_exploit_examples:
+                    metrics["exploit/target_distance"] = target_distance_sum.item() / n_exploit_examples
+                if n_explore_examples:
+                    metrics["explore/weighted_nll_reduction"] = explore_reduction_sum.item() / n_explore_examples
+                if usage_counter:
+                    total_actions = usage_counter.get("a", 0) + usage_counter.get("b", 0)
+                    metrics["dagger/frac_self_generated"] = (
+                        usage_counter.get("a", 0) / total_actions if total_actions else float("nan")
+                    )
+                metrics.update(extra_metrics)
                 if "exploit" in self.branches:
                     metrics["policy_nll/train_exploit"] = (
                         branch_totals["exploit"].item() / n_exploit if n_exploit else float("nan")

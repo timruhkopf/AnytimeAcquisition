@@ -1,0 +1,17 @@
+# The variable-x_dim PFN checkpoint from experiment=pfn_variable_xdim_smoke
+# (docs/log/2026-08-31-variable-xdim-training-stagnation.md) -- trained with
+# variable_dim_min set, so it accepts any x_dim up to max_x_dim below rather
+# than only the one dimensionality it was nominally configured for. Fields
+# below read directly via `torch.load` (2026-09-01) -- update by hand
+# whenever the underlying .pt changes (this file is validated against the
+# checkpoint's own embedded config at runtime, but not auto-synced).
+checkpoint_path: ${aa_root:}/models/pfn_variable_xdim_smoke.pt
+max_x_dim: 6
+d_model: 64
+n_heads: 4
+n_layers: 4
+d_ff: 128
+n_bins: 64
+
+mlflow_run_id: d4615a19b6db4463b392ad80d75160ab
+git_commit: d48bf610cc8ab58e2dbecda24bd7b0ad226510af

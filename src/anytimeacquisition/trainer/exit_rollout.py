@@ -99,15 +99,66 @@ def random_policy(x_context: torch.Tensor, y_context: torch.Tensor, x_dim: int) 
     return torch.rand(B, x_dim)
 
 
+def mixed_policy_fn(policy_a, policy_b, beta: float, usage_counter: dict | None = None):
+    """DAgger-style mixture policy (Ross et al.) -- at every call (rollout
+    step), each batch *instance* independently uses `policy_a` with
+    probability `beta`, else `policy_b`. Per-instance rather than per-whole-
+    rollout: a single rollout then already contains a mix of both kinds of
+    transitions at a given step, not just across time -- matching DAgger's
+    actual per-timestep mixture more closely than an all-or-nothing per-
+    rollout coin flip would.
+
+    Both `policy_a`/`policy_b` are called every time regardless of `beta`
+    (simpler than trying to only compute the one that's "used", and cheap
+    relative to everything else in a rollout step -- one extra PFN forward
+    pass, not another oracle search) -- `torch.where` then selects per
+    instance. Safe to use with a policy_fn that tracks internal state across
+    calls (e.g. `models.action_head.action_head_policy_fn`'s step counter):
+    both callables are still invoked exactly once per rollout step, exactly
+    as `rollout_episode` already guarantees.
+
+    `usage_counter`: optional mutable dict, updated in place with running
+    `{"a": n, "b": n}` instance-counts across every call -- lets a caller
+    read back the EMPIRICALLY realized `policy_a`/`policy_b` split after a
+    whole rollout (`trainer.action_head_imitation_trainer`'s
+    `dagger/frac_self_generated`), as a sanity check that the per-instance
+    mixing is actually behaving like the intended `beta`, not just trusting
+    the schedule blindly.
+
+    See `trainer.action_head_imitation_trainer.ActionHeadImitationTrainer`
+    for the per-round `beta` decay schedule this is built for.
+    """
+    def policy_fn(x_context: torch.Tensor, y_context: torch.Tensor, x_dim: int) -> torch.Tensor:
+        action_a = policy_a(x_context, y_context, x_dim)
+        action_b = policy_b(x_context, y_context, x_dim)
+        use_a = torch.rand(x_context.shape[0]) < beta
+        if usage_counter is not None:
+            usage_counter["a"] = usage_counter.get("a", 0) + int(use_a.sum().item())
+            usage_counter["b"] = usage_counter.get("b", 0) + int((~use_a).sum().item())
+        return torch.where(use_a.unsqueeze(-1), action_a, action_b)
+    return policy_fn
+
+
 def rollout_episode(
     prior: BNNPrior, n_init: int, n_steps: int, policy_fn=random_policy, noise: bool = True,
-    build_interesting_points_kwargs: dict | None = None,
+    build_interesting_points_kwargs: dict | None = None, reset: bool = True,
 ) -> dict:
     """One self-play episode against `prior` — resets it once (fresh
     architecture/weights), then never again for the rest of the episode.
     `noise`: whether the *trajectory's own* observations are noisy (realistic
     self-play, the default) — independent of `exploit_search`'s own
     noise=False oracle access to the clean surface.
+
+    `reset`: set False to roll out against `prior`'s *current* instance
+    without redrawing it — the caller must have already called
+    `prior.reset()` itself. For generating several independent trajectories
+    against the exact same underlying BNN instance (e.g. averaging a cheap
+    policy like `random_policy` over repeated restarts on one instance to
+    get a lower-variance baseline estimate, `callbacks/action_head_validation.py`'s
+    `build_auc_eval_callback`) — each call still draws its own fresh
+    `x_context`/policy randomness, only the instance itself (its drawn
+    architecture/weights) stays fixed across calls. Default `True` (reset
+    every call) matches every existing caller's behavior unchanged.
 
     `build_interesting_points_kwargs`: if given (not None), builds the
     explore branch's fixed test-point set (`interesting_points.build_interesting_points`)
@@ -128,7 +179,8 @@ def rollout_episode(
         "x_int"/"y_int_true": present only if `build_interesting_points_kwargs`
         was given.}
     """
-    prior.reset()
+    if reset:
+        prior.reset()
     result = {}
     if build_interesting_points_kwargs is not None:
         x_int, y_int_true = build_interesting_points(prior, **build_interesting_points_kwargs)
@@ -159,6 +211,7 @@ def label_branches(y_context: torch.Tensor, n_init: int) -> torch.Tensor:
 
 def build_exploit_buffer(
     prior: BNNPrior, rollout: dict, n_init: int, exploit_search_kwargs: dict | None = None,
+    steps: set[int] | None = None, require_exploit_label: bool = True,
 ) -> list[ImitationExample]:
     """Runs `exploit_search` at every exploit-labeled (instance, step) pair
     and collects the resulting oracle corrections into a flat buffer. Calls
@@ -169,13 +222,37 @@ def build_exploit_buffer(
     without also slicing the prior's internal weight tensors — out of scope
     for this skeleton) — simpler and correct, at the cost of some wasted
     search on non-exploit instances.
+
+    `steps`: optional allowlist of step indices to consider at all (other
+    steps are skipped regardless of labeling) -- unset (default) considers
+    every step, unchanged from before.
+
+    `require_exploit_label`: `True` (default) matches every previous
+    caller -- only instances `label_branches` actually calls exploit-labeled
+    at a given step get a target. `False` flips the per-step mask to the
+    *complement* (`~is_exploit`, i.e. the flat instances) instead -- used to
+    generate "filler" exploit targets at steps the explore branch chose not
+    to spend its own budget on (`trainer.action_head_imitation_trainer`'s
+    `fill_unselected_explore_steps_with_exploit`, 2026-09-01), rather than
+    leaving those instances with no training example at all. Exploit's own
+    oracle (a local refinement of the current incumbent, given the current
+    context) is well-defined at ANY step, not just ones where the realized
+    trajectory happened to already show an improvement -- `label_branches`
+    is a labeling/routing choice for which oracle to consult by default,
+    not a claim that `exploit_search`'s result is only meaningful at
+    naturally-improving steps. A caller combining a `require_exploit_label=True`
+    call with a `require_exploit_label=False` call at *different, disjoint*
+    step sets never double-labels the same (instance, step) pair (each
+    instance is exploit-labeled XOR flat at a given step, never both).
     """
     exploit_search_kwargs = exploit_search_kwargs or {}
     is_exploit = label_branches(rollout["y_context"], n_init)  # [B, n_steps]
 
     buffer: list[ImitationExample] = []
     for step, (x_ctx, y_ctx) in enumerate(rollout["pre_step_contexts"]):
-        step_mask = is_exploit[:, step]
+        if steps is not None and step not in steps:
+            continue
+        step_mask = is_exploit[:, step] if require_exploit_label else ~is_exploit[:, step]
         if not step_mask.any():
             continue
         x_star, y_star = exploit_search(prior, x_ctx, y_ctx, **exploit_search_kwargs)
@@ -190,7 +267,7 @@ def build_exploit_buffer(
 
 def build_explore_buffer(
     prior: BNNPrior, pfn: PFN, bar_dist: BarDistribution, rollout: dict, n_init: int,
-    explore_search_kwargs: dict | None = None,
+    explore_search_kwargs: dict | None = None, steps: set[int] | None = None,
 ) -> list[ImitationExample]:
     """Runs `explore_search` at every explore-labeled (instance, step) pair
     (the complement of `label_branches` -- flat steps) and collects the
@@ -212,6 +289,20 @@ def build_explore_buffer(
     there is nothing informative to imitate there, so no buffer entry is
     added for it, same as `build_exploit_buffer` skipping steps with no
     exploit-labeled instances at all.
+
+    `explore_search` seeds its search at the point the rollout's own
+    policy actually played at each step (`rollout["x_context"][:,
+    n_init+step, :]`, `x_realized` below) rather than a fresh random draw
+    -- a genuine correction of what was played, not an independent oracle
+    search that ignores it (see `search.explore.explore_search`'s
+    docstring, 2026-09-01).
+
+    `steps`: optional allowlist of step indices to consider at all (other
+    steps are skipped regardless of labeling) -- unset (default) considers
+    every step, unchanged from before. Used by
+    `trainer.action_head_imitation_trainer`'s `max_explore_steps_per_rollout`
+    to bound how many (expensive, PFN-forward/backward-bearing)
+    `explore_search` calls a single rollout pays for.
     """
     assert "x_int" in rollout and "y_int_true" in rollout, (
         "rollout must be built with rollout_episode(..., build_interesting_points_kwargs=...) "
@@ -223,11 +314,15 @@ def build_explore_buffer(
 
     buffer: list[ImitationExample] = []
     for step, (x_ctx, y_ctx) in enumerate(rollout["pre_step_contexts"]):
+        if steps is not None and step not in steps:
+            continue
         step_mask = is_explore[:, step]
         if not step_mask.any():
             continue
+        x_realized = rollout["x_context"][:, n_init + step, :]  # [B, x_dim] -- the point actually played at this step
         x_star, val_star, has_signal = explore_search(
-            prior, pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"], **explore_search_kwargs,
+            prior, pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"], x_realized,
+            **explore_search_kwargs,
         )
         for b in torch.nonzero(step_mask & has_signal, as_tuple=False).squeeze(-1).tolist():
             buffer.append(ImitationExample(

@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 
 from anytimeacquisition.callbacks.action_head_validation import (
@@ -42,16 +43,23 @@ def test_auc_eval_callback_returns_finite_metrics_for_all_three_policies():
         ei_kwargs={"num_restarts": 2, "raw_samples": 8}, log_figure=False,
     )
     metrics = callback.fn(0, trainer)
-    assert set(metrics) == {"auc/action_head", "auc/random", "auc/ei"}
+    assert set(metrics) == {
+        "auc/action_head", "auc/random", "auc/ei",
+        "auc_improvement_vs_random/mean", "auc_improvement_vs_random/std",
+        "auc_improvement_vs_random/mean_minus_std", "auc_improvement_vs_random/mean_plus_std",
+    }
     assert _all_finite(metrics)
+    assert metrics["auc_improvement_vs_random/mean"] == pytest.approx(
+        metrics["auc/random"] - metrics["auc/action_head"]
+    )
 
 
-def test_auc_eval_callback_uses_identical_instances_across_policies():
-    """Same eval_seed -> same underlying BNN draws for all three policies
-    (see module docstring) -- checked indirectly: two calls with the same
-    eval_seed reproduce the exact same auc/random (random_policy's own
-    randomness comes from the global torch RNG, so seed it identically
-    around each call)."""
+def test_auc_eval_callback_random_baseline_is_memoized_not_recomputed():
+    """random/ei are computed once and cached -- a second call on the SAME
+    callback must return the identical value without re-rolling anything
+    (checked by making random_policy itself non-deterministic across calls
+    were it actually re-invoked: reseeding differently before each call
+    would change a freshly-computed value but not a cached one)."""
     trainer = _fixture_trainer()
     callback = build_auc_eval_callback(
         x_dim=1, n_init=3, n_steps=5, eval_batch_size=3, eval_seed=42,
@@ -59,8 +67,34 @@ def test_auc_eval_callback_uses_identical_instances_across_policies():
     )
     torch.manual_seed(0)
     m1 = callback.fn(0, trainer)
-    torch.manual_seed(0)
+    torch.manual_seed(123)  # deliberately different -- would change a fresh recompute
     m2 = callback.fn(0, trainer)
+    assert m1["auc/random"] == m2["auc/random"]
+    assert m1["auc/ei"] == m2["auc/ei"]
+
+
+def test_auc_eval_callback_uses_identical_instances_across_policies():
+    """Same eval_seed -> same underlying BNN draws for random/action_head/
+    ei -- checked across two INDEPENDENTLY memoized callbacks (each caches
+    its own baseline once), reseeding the global RNG identically before
+    each callback's first call so their own internal random-restart
+    generation is comparably seeded too."""
+    trainer = _fixture_trainer()
+
+    torch.manual_seed(0)
+    callback1 = build_auc_eval_callback(
+        x_dim=1, n_init=3, n_steps=5, eval_batch_size=3, eval_seed=42,
+        ei_kwargs={"num_restarts": 2, "raw_samples": 8}, log_figure=False,
+    )
+    m1 = callback1.fn(0, trainer)
+
+    torch.manual_seed(0)
+    callback2 = build_auc_eval_callback(
+        x_dim=1, n_init=3, n_steps=5, eval_batch_size=3, eval_seed=42,
+        ei_kwargs={"num_restarts": 2, "raw_samples": 8}, log_figure=False,
+    )
+    m2 = callback2.fn(0, trainer)
+
     assert m1["auc/random"] == m2["auc/random"]
 
 

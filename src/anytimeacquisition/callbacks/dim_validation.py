@@ -94,6 +94,8 @@ def build_dim_validation_callback(
     if too_big:
         raise ValueError(f"dims {too_big} exceed max_x_dim={max_x_dim} -- the model can't accept them")
 
+    # FIXME: can we somehow stack the sample_episodes with different dims, do make the forward pass once, and then
+    #  unstack the logits to compute the metrics for efficiency? (or even unstack after metric, but sort by dim)
     val_priors = {
         d: BNNPrior(
             batch_size=n_val_context, x_dim=d, variable_dim_min=None, seed=seed,

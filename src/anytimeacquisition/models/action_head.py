@@ -187,6 +187,15 @@ class ActionHead(nn.Module):
             hidden_states = [torch.zeros_like(hs) for hs in hidden_states]
         n_train = x_train.shape[1]
 
+        # The cross-attention query is the FULL 5-token sequence below (the
+        # action_query param + all 4 aux-feature tokens), not action_query
+        # alone -- every ActionHeadBlock self-attends all 5 among themselves
+        # first, then cross-attends all 5 (as queries) into this layer's PFN
+        # train-token hidden states (as keys/values). Only action_query's
+        # own final state (h[:, 0, :] below) is ever read out by
+        # policy_head/value_head -- the 4 aux tokens' own final states are
+        # discarded, they only matter through how they shaped action_query
+        # via self-attention across blocks.
         tokens = [self.action_query.expand(B, -1, -1)]
         for name in AUX_FEATURE_NAMES:
             tokens.append(self.aux_embed[name](aux_features[name].view(B, 1, 1).float()))
@@ -198,7 +207,7 @@ class ActionHead(nn.Module):
             h = block(h, train_hidden, self_mask)
 
         h = self.out_ln(h)
-        action_repr = h[:, 0, :]  # the action-query token
+        action_repr = h[:, 0, :]  # the action-query token's own final state, read out here -- see note above
         alpha_beta = self.policy_head(action_repr).view(B, self.x_dim, 2)
         alpha = F.softplus(alpha_beta[..., 0]) + 1.0
         beta = F.softplus(alpha_beta[..., 1]) + 1.0

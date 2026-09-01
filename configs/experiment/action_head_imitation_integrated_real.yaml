@@ -1,0 +1,46 @@
+# @package _global_
+# Real-scale (not smoke) integrated ActionHead behavior-cloning run --
+# both branches at once, sized for pfn_variable_xdim_smoke.pt's x_dim=6 --
+# pair with pfn_checkpoint=variable_xdim_smoke on the CLI.
+#
+#   uv run python -m anytimeacquisition.pipelines.action_head_imitation \
+#     experiment=action_head_imitation_integrated_real pfn_checkpoint=variable_xdim_smoke allow_dirty=true
+branches: [exploit, explore]
+
+priors:
+  batch_size: 16
+
+trainer:
+  # 800 rollouts is a first real-scale run, not the final target -- meant
+  # to be scaled up once this confirms sane, learning-shaped metrics (see
+  # docs/log/ discussion, 2026-09-01). log_every kept fine (10) for the
+  # cheap built-in metrics (policy_nll/train, grad_norm, ...); the
+  # expensive held-out checks (held_out_l1/auc_eval/blind_ablation) have
+  # their own, coarser, decoupled cadence (configs/action_head_imitation.yaml).
+  n_rollouts: 800
+  n_init: 10
+  n_steps: 40
+  log_every: 100
+  exploit_search_kwargs:
+    n_restarts: 4
+    n_steps: 15
+  explore_search_kwargs:
+    n_restarts: 1
+    n_steps: 15
+  # See action_head_imitation_explore_real.yaml's own comment -- the
+  # explore branch was the dominant per-rollout cost (~2.3min/rollout
+  # measured at n_steps=40, unworkable at n_rollouts=1500); capping to 8
+  # randomly-chosen steps per rollout cuts that roughly 4-5x.
+  max_explore_steps_per_rollout: 8
+  checkpoint_path: ${aa_root:}/models/action_head_imitation_integrated_real.pt
+
+build_interesting_points_kwargs:
+  n_sobol: 64
+  n_random: 64
+  n_basin_restarts: 24
+
+action_head:
+  d_model: 64
+  n_heads: 4
+  d_ff: 128
+  dropout: 0.0

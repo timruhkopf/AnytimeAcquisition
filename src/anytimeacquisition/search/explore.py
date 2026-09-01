@@ -112,9 +112,11 @@ def explore_search(
     y_context: torch.Tensor,
     x_int: torch.Tensor,
     y_int_true: torch.Tensor,
-    n_restarts: int = 8,
+    x_realized: torch.Tensor,
+    n_restarts: int = 1,
     n_steps: int = 30,
     lr: float = 0.05,
+    init_noise_std: float = 0.02,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Multistart GD on the frozen PFN's weighted NLL at `x_int` (see module
     docstring). `prior` must be the *same live instance* `x_context`/
@@ -125,11 +127,27 @@ def explore_search(
     `torch.no_grad()` -- gradients must flow to `x_explore` through both
     `prior.evaluate` and the PFN's NLL computation.
 
-    Random-only restarts, deliberately not incumbent-seeded (unlike
-    `search.exploit.exploit_search`): seeding near the highest-weight point
-    would reintroduce, at the search's initialization, exactly the
-    collapse-toward-the-optimum risk the weighting is meant to avoid at the
-    objective level.
+    `x_realized` [B, x_dim]: the point the rollout's *own* policy actually
+    played at this step (`rollout["x_context"][:, n_init+step, :]`, see
+    `trainer/exit_rollout.py::build_explore_buffer`) — every restart is
+    seeded there (2026-09-01, user-directed correction: this used to be a
+    fresh `torch.rand(...)` draw, discarding what was actually played
+    entirely; that made this an independent oracle search rather than a
+    genuine *correction* of the policy's own proposal, and doesn't extend
+    sensibly once rollouts run under a real policy instead of
+    `random_policy`, since a random draw is no longer a stand-in for "what
+    the policy would have done"). `n_restarts=1` by default (compute
+    budget: each restart is a full `n_steps`-length GD trajectory through
+    the PFN, and explore-labeled steps already vastly outnumber
+    exploit-labeled ones per rollout) — restarts beyond the first, if used,
+    get a small Gaussian position jitter (`init_noise_std`) around
+    `x_realized`, not a global random location; the earlier "random-only,
+    deliberately not incumbent-seeded" design (seeding near the
+    highest-weight point would reintroduce the collapse-toward-the-optimum
+    risk the weighting avoids at the objective level) no longer applies
+    once every restart is seeded at the realized action instead — that
+    action was never selected via anything correlated with the interesting
+    points' weights.
 
     -> (x_star [B, x_dim], weighted_nll_star [B], has_signal [B] bool --
     False where every interesting point's weight was already 0 for that
@@ -162,7 +180,15 @@ def explore_search(
     # treats R as just more query points per instance, no repeat needed
     # here; only the PFN calls need the repeated-row [B*R, ...] form, since
     # each restart needs its own separate augmented-context forward pass).
-    candidates = torch.rand(B, n_restarts, x_dim, requires_grad=True)
+    base = x_realized.unsqueeze(1).expand(B, n_restarts, x_dim)
+    if n_restarts > 1 and init_noise_std > 0:
+        jitter = torch.cat([
+            torch.zeros(B, 1, x_dim),
+            torch.randn(B, n_restarts - 1, x_dim) * init_noise_std,
+        ], dim=1)
+    else:
+        jitter = torch.zeros(B, n_restarts, x_dim)
+    candidates = (base + jitter).clamp(0.0, 1.0).detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([candidates], lr=lr)
 
     # Best-so-far tracking, not just the final iterate: Adam's steps aren't
@@ -250,8 +276,14 @@ if __name__ == "__main__":
         nll_before = bar_dist(pfn(x_context, y_context, x_int), y_int_true)  # [B, N_int]
         weighted_nll_before = (weights * nll_before).sum(dim=-1)
 
+    # Standalone demo, no real rollout/policy here -- x_realized stands in
+    # for "whatever the policy actually played at this step" with a plain
+    # random draw (matching random_policy, round-0's own data-generating
+    # policy); a real caller passes the rollout's own realized next point
+    # (see trainer/exit_rollout.py::build_explore_buffer).
+    x_realized = torch.rand(prior.B, x_dim)
     x_star, val_star, has_signal = explore_search(
-        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, n_restarts=8, n_steps=30, lr=0.05,
+        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, x_realized, n_restarts=1, n_steps=30, lr=0.05,
     )
     print("has_signal per instance (False = weights all zero, result meaningless):", has_signal.tolist())
 

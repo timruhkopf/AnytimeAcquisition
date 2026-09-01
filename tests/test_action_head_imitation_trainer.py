@@ -97,6 +97,33 @@ def test_explore_branch_requires_build_interesting_points_kwargs():
         )
 
 
+def test_dagger_beta_decays_and_is_logged():
+    pfn, bar_dist, prior, action_head = _build()
+    trainer = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit"],
+        n_rollouts=6, n_init=3, n_steps=4, log_every=1,
+        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
+        dagger_decay_rounds=4, dagger_beta_min=0.1,
+    )
+    history = trainer.run()["history"]
+    betas = history["dagger/beta"]
+    assert betas[0] == 1.0
+    assert betas == sorted(betas, reverse=True), "beta must be non-increasing over rollouts"
+    assert all(b >= 0.1 for b in betas), "beta must never drop below dagger_beta_min"
+    assert betas[-1] == pytest.approx(0.1)
+
+
+def test_without_dagger_beta_is_always_one():
+    pfn, bar_dist, prior, action_head = _build()
+    trainer = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit"],
+        n_rollouts=3, n_init=3, n_steps=4, log_every=1,
+        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
+    )
+    history = trainer.run()["history"]
+    assert history["dagger/beta"] == [1.0, 1.0, 1.0]
+
+
 def test_checkpoint_round_trip(tmp_path):
     pfn, bar_dist, prior, action_head = _build()
     checkpoint_path = tmp_path / "action_head_ckpt.pt"
@@ -115,3 +142,89 @@ def test_checkpoint_round_trip(tmp_path):
     assert ckpt["mlflow_run_id"] == "abc123"
     reloaded = ActionHead(**model_config)
     reloaded.load_state_dict(ckpt["model_state"])
+
+    from anytimeacquisition.pipelines.action_head_imitation import load_action_head_checkpoint
+
+    loaded_action_head, loaded_ckpt = load_action_head_checkpoint(checkpoint_path)
+    assert loaded_ckpt["mlflow_run_id"] == "abc123"
+    for p1, p2 in zip(action_head.parameters(), loaded_action_head.parameters()):
+        assert torch.equal(p1, p2)
+
+
+def test_new_diagnostic_metrics_are_present_and_finite():
+    pfn, bar_dist, prior, action_head = _build(batch_size=8)
+    trainer = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit", "explore"],
+        n_rollouts=3, n_init=3, n_steps=6, log_every=1,
+        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
+        explore_search_kwargs={"n_restarts": 1, "n_steps": 5},
+        build_interesting_points_kwargs={"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2},
+        dagger_decay_rounds=3, dagger_beta_min=0.1,
+    )
+    history = trainer.run()["history"]
+
+    for key in ("policy/beta_entropy", "grad_norm/action_head", "exploit/target_distance",
+                "explore/signal_rate_train", "dagger/frac_self_generated", "explore/weighted_nll_reduction"):
+        assert key in history, f"missing metric {key}"
+        assert all(v == v for v in history[key]), f"{key} produced a NaN"  # v==v is False for NaN
+
+
+def test_max_explore_steps_per_rollout_limits_distinct_explore_steps():
+    pfn, bar_dist, prior, action_head = _build(batch_size=8)
+    trainer = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["explore"],
+        n_rollouts=1, n_init=3, n_steps=10, log_every=1,
+        explore_search_kwargs={"n_restarts": 1, "n_steps": 5},
+        build_interesting_points_kwargs={"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2},
+        max_explore_steps_per_rollout=2,
+    )
+    from anytimeacquisition.trainer.exit_rollout import random_policy, rollout_episode
+
+    torch.manual_seed(trainer.seed)
+    rollout = rollout_episode(
+        prior, n_init=3, n_steps=10, policy_fn=random_policy,
+        build_interesting_points_kwargs={"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2},
+    )
+    examples, extra = trainer._collect_examples(rollout)
+    distinct_steps = {ex.step for ex in examples}
+    assert len(distinct_steps) <= 2
+    assert "explore/signal_rate_train" in extra
+
+
+def test_fill_unselected_explore_steps_with_exploit_adds_filler_examples():
+    pfn, bar_dist, prior, action_head = _build(batch_size=8)
+    build_ip_kwargs = {"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2}
+
+    trainer_no_fill = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit", "explore"],
+        n_rollouts=1, n_init=3, n_steps=10, log_every=1,
+        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5}, explore_search_kwargs={"n_restarts": 1, "n_steps": 5},
+        build_interesting_points_kwargs=build_ip_kwargs, max_explore_steps_per_rollout=2,
+    )
+    trainer_fill = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=BNNPrior(batch_size=8, x_dim=1, seed=1), action_head=action_head,
+        branches=["exploit", "explore"],
+        n_rollouts=1, n_init=3, n_steps=10, log_every=1,
+        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5}, explore_search_kwargs={"n_restarts": 1, "n_steps": 5},
+        build_interesting_points_kwargs=build_ip_kwargs, max_explore_steps_per_rollout=2,
+        fill_unselected_explore_steps_with_exploit=True,
+    )
+    from anytimeacquisition.trainer.exit_rollout import random_policy, rollout_episode
+
+    torch.manual_seed(0)
+    rollout = rollout_episode(
+        trainer_no_fill.prior, n_init=3, n_steps=10, policy_fn=random_policy,
+        build_interesting_points_kwargs=build_ip_kwargs,
+    )
+    examples_no_fill, extra_no_fill = trainer_no_fill._collect_examples(rollout)
+
+    torch.manual_seed(0)
+    rollout2 = rollout_episode(
+        trainer_fill.prior, n_init=3, n_steps=10, policy_fn=random_policy,
+        build_interesting_points_kwargs=build_ip_kwargs,
+    )
+    examples_fill, extra_fill = trainer_fill._collect_examples(rollout2)
+
+    assert "n_examples/exploit_filler" not in extra_no_fill
+    assert extra_fill.get("n_examples/exploit_filler", 0) > 0
+    assert len(examples_fill) > len(examples_no_fill)

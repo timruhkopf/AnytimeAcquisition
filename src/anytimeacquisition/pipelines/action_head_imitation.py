@@ -97,6 +97,20 @@ def train_action_head_imitation(
     return trainer.run()
 
 
+def load_action_head_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> tuple[ActionHead, dict]:
+    """Symmetric to `pipelines.train_pfn.load_pfn_checkpoint` -- `ckpt["config"]`
+    (`pfn_d_model`/`pfn_n_layers`/`x_dim`/`d_model`/`n_heads`/`d_ff`/`dropout`,
+    see `ActionHeadImitationTrainer`'s own `model_config`) gets **-unpacked
+    straight into `ActionHead(**ckpt["config"])`. No old-format tolerance
+    needed (unlike the PFN loader) -- this is a brand-new checkpoint format,
+    every existing checkpoint already has the current shape."""
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    action_head = ActionHead(**ckpt["config"]).to(device)
+    action_head.load_state_dict(ckpt["model_state"])
+    action_head.eval()
+    return action_head, ckpt
+
+
 @hydra.main(config_path="../../../configs", config_name="action_head_imitation", version_base=None)
 def main(cfg: DictConfig) -> dict:
     """Hydra entry point. Select a named, reproducible config via

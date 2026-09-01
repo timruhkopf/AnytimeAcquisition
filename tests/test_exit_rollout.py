@@ -8,6 +8,7 @@ from anytimeacquisition.trainer.exit_rollout import (
     build_exploit_buffer,
     build_explore_buffer,
     label_branches,
+    mixed_policy_fn,
     random_policy,
     rollout_episode,
 )
@@ -51,6 +52,73 @@ def test_rollout_episode_resets_exactly_once_per_episode():
     assert len(calls) == 1, "rollout_episode must call prior.reset() exactly once per episode"
 
 
+def test_rollout_episode_reset_false_reuses_the_same_instance():
+    """reset=False must skip prior.reset() (caller resets once, up front)
+    and roll out against whatever instance is already live -- checked by
+    verifying the SAME x_context reproduces the SAME y via prior.evaluate
+    across two separate reset=False calls on one prior."""
+    torch.manual_seed(0)
+    prior = _tiny_prior(batch_size=3, x_dim=2)
+    prior.reset()
+    calls = []
+    original_reset = prior.reset
+
+    def counting_reset():
+        calls.append(1)
+        return original_reset()
+
+    prior.reset = counting_reset
+    rollout_episode(prior, n_init=3, n_steps=4, policy_fn=random_policy, reset=False)
+    rollout_episode(prior, n_init=3, n_steps=4, policy_fn=random_policy, reset=False)
+    assert len(calls) == 0, "reset=False must never call prior.reset()"
+
+    probe_x = torch.rand(3, 5, 2)
+    y1 = prior.evaluate(probe_x, noise=False)
+    y2 = prior.evaluate(probe_x, noise=False)
+    assert torch.allclose(y1, y2), "the underlying instance must be unchanged across reset=False calls"
+
+
+def test_mixed_policy_fn_beta_one_matches_policy_a_beta_zero_matches_policy_b():
+    torch.manual_seed(0)
+    x_context, y_context = torch.rand(5, 3, 2), torch.rand(5, 3)
+    policy_a = lambda xc, yc, d: torch.full((xc.shape[0], d), 111.0)
+    policy_b = lambda xc, yc, d: torch.full((xc.shape[0], d), 222.0)
+
+    always_a = mixed_policy_fn(policy_a, policy_b, beta=1.0)
+    assert torch.equal(always_a(x_context, y_context, 2), torch.full((5, 2), 111.0))
+
+    always_b = mixed_policy_fn(policy_a, policy_b, beta=0.0)
+    assert torch.equal(always_b(x_context, y_context, 2), torch.full((5, 2), 222.0))
+
+
+def test_mixed_policy_fn_mixes_per_instance():
+    torch.manual_seed(0)
+    x_context, y_context = torch.rand(200, 3, 2), torch.rand(200, 3)
+    policy_a = lambda xc, yc, d: torch.full((xc.shape[0], d), 1.0)
+    policy_b = lambda xc, yc, d: torch.full((xc.shape[0], d), 0.0)
+
+    mixed = mixed_policy_fn(policy_a, policy_b, beta=0.3)
+    action = mixed(x_context, y_context, 2)
+    frac_a = (action == 1.0).float().mean().item()
+    assert 0.15 < frac_a < 0.45, f"expected roughly beta=0.3 of instances to use policy_a, got {frac_a}"
+
+
+def test_mixed_policy_fn_usage_counter_tracks_realized_split():
+    torch.manual_seed(0)
+    x_context, y_context = torch.rand(200, 3, 2), torch.rand(200, 3)
+    policy_a = lambda xc, yc, d: torch.zeros(xc.shape[0], d)
+    policy_b = lambda xc, yc, d: torch.zeros(xc.shape[0], d)
+
+    usage = {}
+    mixed = mixed_policy_fn(policy_a, policy_b, beta=0.3, usage_counter=usage)
+    mixed(x_context, y_context, 2)
+    mixed(x_context, y_context, 2)
+
+    assert usage["a"] + usage["b"] == 400
+    frac_a = usage["a"] / 400
+    assert 0.15 < frac_a < 0.45
+
+
 def test_label_branches_matches_incumbent_trajectory_reuse():
     n_init = 2
     # Instance 0: improves at step 0, flat at step 1, improves at step 2.
@@ -80,6 +148,41 @@ def test_build_exploit_buffer_respects_incumbent_and_branch_labels():
         assert ex.branch == "exploit"
         assert ex.y_star.item() <= ex.y_context.min().item() + 1e-6
         assert ex.x_star.shape == (2,)
+
+
+def test_build_exploit_buffer_steps_filter_restricts_which_steps_run():
+    torch.manual_seed(0)
+    prior = _tiny_prior(batch_size=3, x_dim=2)
+    n_init, n_steps = 4, 8
+    rollout = rollout_episode(prior, n_init=n_init, n_steps=n_steps, policy_fn=random_policy)
+    is_exploit = label_branches(rollout["y_context"], n_init)
+    exploit_steps = {s for s in range(n_steps) if is_exploit[:, s].any()}
+    assert exploit_steps, "test setup should have at least one exploit-labeled step"
+    keep = {next(iter(exploit_steps))}
+
+    buffer = build_exploit_buffer(
+        prior, rollout, n_init, exploit_search_kwargs={"n_restarts": 4, "n_steps": 10}, steps=keep,
+    )
+    assert buffer and all(ex.step in keep for ex in buffer)
+
+
+def test_build_exploit_buffer_require_exploit_label_false_targets_flat_instances():
+    torch.manual_seed(0)
+    prior = _tiny_prior(batch_size=3, x_dim=2)
+    n_init, n_steps = 4, 8
+    rollout = rollout_episode(prior, n_init=n_init, n_steps=n_steps, policy_fn=random_policy)
+    is_exploit = label_branches(rollout["y_context"], n_init)
+    flat_steps = {s for s in range(n_steps) if (~is_exploit[:, s]).any()}
+    assert flat_steps, "test setup should have at least one flat step"
+
+    filler = build_exploit_buffer(
+        prior, rollout, n_init, exploit_search_kwargs={"n_restarts": 4, "n_steps": 10},
+        steps=flat_steps, require_exploit_label=False,
+    )
+    assert filler
+    for ex in filler:
+        assert ex.branch == "exploit"
+        assert not is_exploit[ex.instance_idx, ex.step], "filler must only cover flat (non-exploit-labeled) instances"
 
 
 def test_rollout_episode_interesting_points_are_fixed_and_match_prior():
@@ -132,3 +235,24 @@ def test_build_explore_buffer_covers_exactly_the_explore_labeled_steps_with_sign
         assert ex.branch == "explore"
         assert is_explore[ex.instance_idx, ex.step]
         assert ex.x_star.shape == (x_dim,)
+
+
+def test_build_explore_buffer_steps_filter_restricts_which_steps_run():
+    torch.manual_seed(0)
+    x_dim = 2
+    prior = _tiny_prior(batch_size=3, x_dim=x_dim)
+    pfn, bar_dist = _tiny_pfn(x_dim=x_dim)
+    n_init, n_steps = 4, 8
+    rollout = rollout_episode(
+        prior, n_init=n_init, n_steps=n_steps, policy_fn=random_policy,
+        build_interesting_points_kwargs={"n_sobol": 6, "n_random": 6, "n_basin_restarts": 4},
+    )
+    is_explore = ~label_branches(rollout["y_context"], n_init)
+    explore_steps = {s for s in range(n_steps) if is_explore[:, s].any()}
+    assert len(explore_steps) >= 2, "test setup should have at least two explore-labeled steps"
+    keep = {next(iter(explore_steps))}
+
+    buffer = build_explore_buffer(
+        prior, pfn, bar_dist, rollout, n_init, explore_search_kwargs={"n_restarts": 3, "n_steps": 5}, steps=keep,
+    )
+    assert all(ex.step in keep for ex in buffer)

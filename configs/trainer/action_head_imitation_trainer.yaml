@@ -13,12 +13,21 @@ log_every: 10
 # plausibly reachable given the tiny context, trading search thoroughness
 # for confidence in the target (mitigates
 # docs/log/2026-08-28-exploit-search-target-may-outrun-context.md's "target
-# may outrun context" risk; user-directed, 2026-08-31).
+# may outrun context" risk; user-directed, 2026-08-31). All restarts now
+# seed at (small perturbations of) the incumbent, not a global random point
+# (2026-09-01, see search/exploit.py) -- n_restarts is cheap to raise a bit
+# since every restart stays local.
 exploit_search_kwargs:
-  n_restarts: 8
+  n_restarts: 4
   n_steps: 15
+# n_restarts=1 (search/explore.py's own default): every explore-labeled
+# step needs its own full n_steps-length GD trajectory through the PFN,
+# and explore-labeled steps vastly outnumber exploit-labeled ones per
+# rollout -- unlike exploit, extra restarts here are NOT cheap
+# (2026-09-01, user-directed compute-budget call). Also now seeds at the
+# rollout's own realized action, not a random draw -- see search/explore.py.
 explore_search_kwargs:
-  n_restarts: 8
+  n_restarts: 1
   n_steps: 15
 train_value_head: false
 checkpoint_path: null  # set via an experiment config, or override directly

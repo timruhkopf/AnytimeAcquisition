@@ -78,12 +78,25 @@ action_head_validation:
     ei_kwargs:
       num_restarts: 5
       raw_samples: 64
+    # random/EI are computed ONCE (memoized) and re-emitted as fixed
+    # reference values every subsequent tick, each averaged over this many
+    # independent rollouts on the SAME held-out instance(s) first --
+    # n_ei_restarts lower than n_random_restarts since EI is far more
+    # expensive per restart (independent GP fit + acqf optimization) -- see
+    # callbacks/action_head_validation.py::build_auc_eval_callback.
+    n_random_restarts: 5
+    n_ei_restarts: 3
     log_figure: true
     every_n_steps: 50
   held_out_l1:
     eval_batch_size: 8
     eval_seed: 1000
-    every_n_steps: null
+    # Explicitly decoupled from trainer.log_every (2026-09-01) -- this does
+    # a real held-out rollout + oracle search, same cost order as a
+    # training rollout, so it shouldn't fire at whatever fine cadence
+    # log_every uses for the cheap built-in metrics (policy_nll/train,
+    # grad_norm, ...). Matches auc_eval/blind_ablation's own cadence.
+    every_n_steps: 50
   blind_ablation:
     eval_batch_size: 8
     eval_seed: 1001

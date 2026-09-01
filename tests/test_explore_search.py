@@ -44,9 +44,10 @@ def test_explore_search_shapes_and_has_signal():
     x_int = torch.rand(B, N_int, x_dim)
     with torch.no_grad():
         y_int_true = prior.evaluate(x_int, noise=False)
+    x_realized = torch.rand(B, x_dim)
 
     x_star, val_star, has_signal = explore_search(
-        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, n_restarts=3, n_steps=5,
+        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, x_realized, n_restarts=3, n_steps=5,
     )
     assert x_star.shape == (B, x_dim)
     assert val_star.shape == (B,)
@@ -67,9 +68,10 @@ def test_explore_search_teacher_forces_x_stars_y_from_the_prior_not_the_pfn():
     x_int = torch.rand(3, 6, x_dim)
     with torch.no_grad():
         y_int_true = prior.evaluate(x_int, noise=False)
+    x_realized = torch.rand(3, x_dim)
 
     x_star, _, has_signal = explore_search(
-        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, n_restarts=4, n_steps=10,
+        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, x_realized, n_restarts=4, n_steps=10,
     )
     assert has_signal.any(), "test setup should produce at least one instance with signal"
 
@@ -87,9 +89,10 @@ def test_explore_search_has_no_signal_when_all_interesting_points_are_worse_than
     x_context, y_context = torch.rand(2, 4, x_dim), torch.full((2, 4), 0.01)  # incumbent is already ~best possible
     x_int = torch.rand(2, 5, x_dim)
     y_int_true = torch.full((2, 5), 0.99)  # every interesting point is far worse than the incumbent
+    x_realized = torch.rand(2, x_dim)
 
     _, _, has_signal = explore_search(
-        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, n_restarts=2, n_steps=3,
+        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, x_realized, n_restarts=2, n_steps=3,
     )
     assert (~has_signal).all()
 
@@ -109,9 +112,10 @@ def test_explore_search_reduces_weighted_nll_at_interesting_points():
     with torch.no_grad():
         nll_before = bar_dist(pfn(x_context, y_context, x_int), y_int_true)
         weighted_before = (weights * nll_before).sum(dim=-1)
+    x_realized = torch.rand(2, x_dim)
 
     x_star, val_star, has_signal = explore_search(
-        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, n_restarts=6, n_steps=40, lr=0.05,
+        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, x_realized, n_restarts=6, n_steps=40, lr=0.05,
     )
 
     with torch.no_grad():
