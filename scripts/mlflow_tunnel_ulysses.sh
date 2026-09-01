@@ -42,6 +42,28 @@
 #   - MLflow's tracking dir is the default `${aa_root:}/mlruns` inside that
 #     repo clone, i.e. AA_MLFLOW_DIR was NOT set for runs launched on
 #     ulysses. If it was, set AA_REMOTE_MLFLOW_DIR to that same path.
+#
+# A THIRD gotcha in this family (2026-09-01, cost real debugging time --
+# dashboard showed only an empty "Default" experiment even right after a
+# fresh run, with no wrong-path or orphaned-process explanation): PyCharm's
+# SSH *Python interpreter* (the thing that actually runs e.g. train_pfn.py
+# when using ulysses as a remote interpreter) auto-uploads the project to
+# its OWN ephemeral staging dir, /tmp/pycharm_project_<hash> -- a totally
+# separate sync mechanism from the "Deployment" config
+# (.idea/deployment.xml) that maps REMOTE_REPO_DIR above and excludes
+# mlruns/models/outputs/multirun/archive/.venv from upload. The interpreter
+# staging copy has NO such exclusions, and since `${aa_root:}` is
+# `Path(__file__)`-anchored, every interpreter-launched run's real mlruns/
+# lands under that /tmp path, not REMOTE_REPO_DIR -- even though the
+# interpreter's own venv binary is genuinely at REMOTE_REPO_DIR/.venv,
+# which is what makes this so easy to miss. Confirm which one you're
+# hitting via `ssh ulysses ps aux | grep pipelines` -- if the running
+# script's own path starts with /tmp/pycharm_project_, point this script's
+# AA_REMOTE_MLFLOW_DIR at that dir's mlruns/ instead (the <hash> suffix
+# regenerates whenever the interpreter is recreated, so don't hardcode it
+# here). The durable fix is in PyCharm's interpreter settings (a sync-
+# folders / path-mapping option to reuse the Deployment-mapped path instead
+# of its own temp staging dir), not this script.
 set -euo pipefail
 
 REMOTE_HOST="${AA_REMOTE_HOST:-ulysses}"

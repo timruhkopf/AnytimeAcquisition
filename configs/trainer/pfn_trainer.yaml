@@ -3,8 +3,8 @@
 # same pattern as trainer/dummy.yaml's benchmark/prior/surrogate.
 _target_: anytimeacquisition.trainer.pfn_trainer.PFNTrainer
 n_steps: 100000
-min_train: 3
-max_train: 100
+min_train: 5
+max_train: 300
 n_test: 1000
 lr: 1.0e-3
 warmup_steps: 50

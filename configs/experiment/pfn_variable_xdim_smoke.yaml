@@ -14,13 +14,13 @@
 # active_dim to actually vary (1..4) step to step.
 # Run: uv run python -m anytimeacquisition.pipelines.train_pfn experiment=pfn_variable_xdim_smoke
 priors:
-  x_dim: 4
+  x_dim: 6
   batch_size: 32
   variable_dim_min: 1
 models:
   surrogates:
     d_model: 64
-    n_layers: 3
+    n_layers: 4
     n_bins: 64
 trainer:
   n_steps: 500
@@ -33,4 +33,4 @@ trainer:
 # and mse/val_dim{1..4} alongside the trainer's own nll/train, mse/train
 # (metric-type first, so MLflow groups all nll curves together, all mse
 # curves together).
-validate_dims: [1, 2, 3, 4]
+validate_dims: [1, 2, 3, 4, 5, 6]

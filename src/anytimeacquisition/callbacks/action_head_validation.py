@@ -185,14 +185,20 @@ def build_auc_eval_callback(
     return Callback(name="", fn=probe, every_n_steps=every_n_steps)
 
 
-def _held_out_l1(trainer: Any, n_init: int, n_steps: int, eval_seed: int, batch_size: int,
-                  prior_kwargs: dict | None, blind: bool) -> dict:
-    """Shared machinery for `build_held_out_target_l1_callback` and
-    `build_blind_ablation_callback` -- a fresh held-out `random_policy`
-    rollout, the SAME oracle-target machinery training uses
-    (`build_exploit_buffer`/`build_explore_buffer`), mean L1 between
-    `beta_mode(action_head(...))` and the oracle's own `x_star`, per branch.
-    """
+def _build_held_out_examples(trainer: Any, n_init: int, n_steps: int, eval_seed: int, batch_size: int,
+                              prior_kwargs: dict | None) -> tuple[dict, list]:
+    """The expensive, blind-independent half of the held-out L1 check -- a
+    fresh held-out `random_policy` rollout plus the SAME oracle-target
+    machinery training uses (`build_exploit_buffer`/`build_explore_buffer`,
+    uncapped -- unlike training, these validation probes don't apply
+    `max_explore_steps_per_rollout` subsampling, so this pays the full
+    per-step `explore_search` cost). Split out from `_l1_from_examples`
+    (2026-09-01, compute-cost finding) so `build_blind_ablation_callback`
+    can build this buffer ONCE and reuse it for both its real and blind
+    passes, rather than re-running the identical oracle search twice --
+    `explore_search`/`exploit_search`'s output never depends on
+    `trainer.action_head` at all, only the final L1-against-ActionHead step
+    (`_l1_from_examples`) does."""
     prior = _held_out_prior(trainer.prior.d, batch_size, eval_seed, prior_kwargs)
     build_ip_kwargs = trainer.build_interesting_points_kwargs if "explore" in trainer.branches else None
     rollout = rollout_episode(prior, n_init, n_steps, policy_fn=random_policy, build_interesting_points_kwargs=build_ip_kwargs)
@@ -202,7 +208,13 @@ def _held_out_l1(trainer: Any, n_init: int, n_steps: int, eval_seed: int, batch_
         examples += build_exploit_buffer(prior, rollout, n_init, trainer.exploit_search_kwargs)
     if "explore" in trainer.branches:
         examples += build_explore_buffer(prior, trainer.pfn, trainer.bar_dist, rollout, n_init, trainer.explore_search_kwargs)
+    return rollout, examples
 
+
+def _l1_from_examples(trainer: Any, n_steps: int, rollout: dict, examples: list, blind: bool) -> dict:
+    """The cheap, blind-dependent half: mean L1 between `beta_mode(action_head(...))`
+    and the oracle's own `x_star`, per branch, over an already-built
+    `(rollout, examples)` pair from `_build_held_out_examples`."""
     by_step: dict[int, list] = {}
     for ex in examples:
         by_step.setdefault(ex.step, []).append(ex)
@@ -241,7 +253,8 @@ def build_held_out_target_l1_callback(
     trainer has enabled)."""
 
     def probe(step: int, trainer: Any) -> dict:
-        l1 = _held_out_l1(trainer, n_init, n_steps, eval_seed, eval_batch_size, prior_kwargs, blind=False)
+        rollout, examples = _build_held_out_examples(trainer, n_init, n_steps, eval_seed, eval_batch_size, prior_kwargs)
+        l1 = _l1_from_examples(trainer, n_steps, rollout, examples, blind=False)
         return {f"l1/{branch}": v for branch, v in l1.items()}
 
     return Callback(name="", fn=probe, every_n_steps=every_n_steps)
@@ -256,11 +269,16 @@ def build_blind_ablation_callback(
     (`blind_ratio/exploit`, `blind_ratio/explore`), mirroring
     `pipelines/action_head_posterior_distill.py`'s own `real_vs_blind_ratio`
     convention (< 1 means real clearly beats blind, i.e. the cross-attention
-    link is carrying signal, not just aux-token/dataset statistics)."""
+    link is carrying signal, not just aux-token/dataset statistics). Builds
+    the held-out rollout/oracle buffer ONCE (2026-09-01, compute-cost fix)
+    and reuses it for both the real and blind passes -- the oracle search
+    doesn't depend on `trainer.action_head`, so re-running it per pass was
+    pure waste (roughly halves this callback's cost)."""
 
     def probe(step: int, trainer: Any) -> dict:
-        real = _held_out_l1(trainer, n_init, n_steps, eval_seed, eval_batch_size, prior_kwargs, blind=False)
-        blind = _held_out_l1(trainer, n_init, n_steps, eval_seed, eval_batch_size, prior_kwargs, blind=True)
+        rollout, examples = _build_held_out_examples(trainer, n_init, n_steps, eval_seed, eval_batch_size, prior_kwargs)
+        real = _l1_from_examples(trainer, n_steps, rollout, examples, blind=False)
+        blind = _l1_from_examples(trainer, n_steps, rollout, examples, blind=True)
         return {
             f"blind_ratio/{branch}": (real[branch] / blind[branch] if blind[branch] else float("nan"))
             for branch in real

@@ -93,7 +93,14 @@ node's shared, so nothing long-running gets started there.
   (mlflow 3.x deprecated the plain file store; `train.py` sets
   `MLFLOW_ALLOW_FILE_STORE=true` to opt back in). Tracking dir defaults to
   `<repo_root>/mlruns`, override with the `AA_MLFLOW_DIR` env var to point at
-  shared cluster storage for a run to be visible across nodes.
+  shared cluster storage for a run to be visible across nodes. On LUIS,
+  `scripts/submit.sh`/`scripts/slurm/train.sbatch` instead redirect
+  `AA_PROJECT_ROOT` to `$BIGWORK/AnytimeAcquisition` (not `$HOME` or
+  `$PROJECT` — see `docs/OPEN_QUESTIONS.md` #6 for why), which moves
+  `mlruns/`, `outputs/`/`multirun/` (and submitit's own job-log dir nested
+  under it), and `models/` there together — `AA_MLFLOW_DIR` stays available
+  on top of that if you want mlflow data to live somewhere different from
+  the rest.
 - **`outputs/`, `multirun/`, `mlruns/`, and `models/` are top-level,
   gitignored siblings of `src/`** — `src/anytimeacquisition/utils/paths.py`
   registers a custom `aa_root` OmegaConf resolver (`${aa_root:}` in

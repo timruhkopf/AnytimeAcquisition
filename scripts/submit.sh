@@ -24,6 +24,29 @@ fi
 
 mkdir -p logs
 
+# hydra.run.dir/hydra.sweep.dir, checkpoint_path, and MLflow's tracking dir
+# all resolve through the same ${aa_root:} resolver (src/anytimeacquisition/
+# utils/paths.py), which defaults to the repo clone's own location -- on
+# LUIS that's under $HOME (see CLAUDE.md). LUIS's storage docs are explicit
+# that $HOME must not hold data used by compute jobs (slow NFS, tiny quota),
+# and that $PROJECT isn't even mounted on compute nodes, only login/transfer
+# -- so outputs/, multirun/ (which is also where hydra-submitit-launcher's
+# own per-job .submitit/ log dir nests, since it defaults to
+# ${hydra.sweep.dir}/.submitit/%j), models/, and mlruns/ all need somewhere
+# else. $BIGWORK (InfiniBand, all nodes incl. compute, no backup -- treat as
+# scratch, see docs/OPEN_QUESTIONS.md #6) is the only option that's both
+# fast and reachable from every job. Redirecting AA_PROJECT_ROOT moves all
+# four together in one step, rather than four separate env vars drifting
+# out of sync; AA_MLFLOW_DIR is still honored on top of this if you ever
+# want mlflow data to live somewhere different from the rest (e.g. $PROJECT
+# for archival) -- see configs/callbacks/mlflow.yaml.
+# Exported here (not just in train.sbatch) so both dispatch paths below get
+# it: sbatch inherits the submitting shell's environment by default, and
+# the multirun path calls python directly in this same shell.
+: "${BIGWORK:?\$BIGWORK is not set -- scripts/submit.sh targets LUIS, is this its login node?}"
+export AA_PROJECT_ROOT="${AA_PROJECT_ROOT:-${BIGWORK}/AnytimeAcquisition}"
+mkdir -p "${AA_PROJECT_ROOT}"
+
 MODULE="$1"
 shift
 

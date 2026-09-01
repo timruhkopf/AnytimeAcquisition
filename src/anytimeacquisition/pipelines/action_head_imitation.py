@@ -1,8 +1,9 @@
 """ActionHead behavior-cloning pipeline (M5) -- trains the `ActionHead`
 against the privileged-search oracles (`search/exploit.py`,
 `search/explore.py`) via `trainer.action_head_imitation_trainer.ActionHeadImitationTrainer`,
-round-0 only (rollouts under `trainer.exit_rollout.random_policy`, no
-DAgger iteration yet -- see that trainer's own module docstring).
+DAgger-mixed by default (round-0 pure `trainer.exit_rollout.random_policy`,
+phased into the ActionHead's own rollout behavior -- see that trainer's own
+module docstring for the schedule).
 
 One pipeline (not three): `branches` (a config value, `[exploit]`/
 `[explore]`/`[exploit, explore]`) selects the marginal-exploit,

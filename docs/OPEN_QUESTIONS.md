@@ -47,9 +47,30 @@ picked silently. Resolve and delete/move to a changelog as they're settled.
    what these scripts use — if anything still depends on it, that's now
    stale.
 
-6. **`AA_MLFLOW_DIR` shared path.** What network-filesystem path should
-   parallel SLURM jobs point MLflow's file store at so all runs land in one
-   place?
+6. ~~`AA_MLFLOW_DIR` shared path.~~ **Resolved 2026-09-01: redirect
+   `AA_PROJECT_ROOT` to `$BIGWORK/AnytimeAcquisition`.**
+   Per LUIS's storage docs (docs.cluster.uni-hannover.de/doku.php/guide/storage_systems):
+   `$HOME` is explicitly "do not put data here that you use in compute
+   jobs" (slow NFS, 10GB/12GB quota); `$PROJECT` (group storage, 10TB) is
+   only mounted on login/transfer nodes, **not compute nodes**, so parallel
+   jobs can't write there mid-run at all; `$BIGWORK` (InfiniBand, all
+   nodes including compute, 100GB/1TB per-user quota, no backup — treat as
+   scratch) is the only one both fast and reachable from every job. Rather
+   than redirecting `AA_MLFLOW_DIR` alone, `scripts/submit.sh`/
+   `scripts/slurm/train.sbatch` redirect `AA_PROJECT_ROOT` instead — the
+   `aa_root` resolver (`src/anytimeacquisition/utils/paths.py`) backs
+   `hydra.run.dir`/`hydra.sweep.dir` (and therefore hydra-submitit-launcher's
+   own `.submitit/` job-log dir, which nests under `hydra.sweep.dir`),
+   `checkpoint_path`, *and* MLflow's tracking dir, so redirecting only the
+   latter would've left Hydra/submitit logs and checkpoints still
+   defaulting under `$HOME`. `AA_MLFLOW_DIR` remains available on top of
+   this for pointing mlflow data somewhere different from the rest (e.g.
+   `$PROJECT` for archival) — see `configs/callbacks/mlflow.yaml`.
+   `scripts/mlflow_sync_luis.sh` resolves the same `$BIGWORK` path via a
+   login-shell SSH round-trip rather than assuming it's set in a bare
+   non-interactive SSH command's environment. Since `$BIGWORK` has no
+   backup, copy finished runs to `$PROJECT` manually if you want them
+   retained long-term — nothing here automates that yet.
 
 7. ~~Python/torch version pinning, and CUDA torch for `ulysses`.~~
    **Partially resolved 2026-08-31: `cu124` confirmed correct on

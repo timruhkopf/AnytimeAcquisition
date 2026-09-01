@@ -8,12 +8,15 @@ builds. Same `_target_`-instantiable shape as `PFNTrainer`
 config-driven hyperparameter on `self`, `run()` takes no arguments.
 
 Scope, per the M5 plan (see docs/log/ and the plan this trainer was built
-from): **round-0 only by default, DAgger-style rollout mixing available,
-opt-in** (`dagger_decay_rounds`, 2026-09-01) -- with it unset, every
-rollout uses `trainer.exit_rollout.random_policy` (matching "learn to
-exploit/explore from a random trajectory"); with it set, rollouts mix in
-the ActionHead's own (stochastic) behavior via a linearly-decaying `beta`,
-per `trainer.exit_rollout.mixed_policy_fn`. **Still no persistent replay
+from): **DAgger-style rollout mixing is the default** (`dagger_decay_rounds
+= "auto"`, 2026-09-01, user-directed) -- round 0 rolls out under pure
+`trainer.exit_rollout.random_policy` (matching "learn to exploit/explore
+from a random trajectory"), then rollouts phase in the ActionHead's own
+(stochastic) behavior via a linearly-decaying `beta = P(random_policy)`
+(1.0 -> `dagger_beta_min`, spanning this run's own `n_rollouts` by
+default), per `trainer.exit_rollout.mixed_policy_fn`. Pass
+`dagger_decay_rounds=None` to disable mixing entirely (pure round-0-only
+behavior, for ablations/back-compat). **Still no persistent replay
 buffer across rollouts, deliberately** -- every rollout draws a brand-new
 BNN instance regardless of which policy generates it, so an old buffer
 entry's context would reflect an earlier, less-trained rollout policy's
@@ -87,13 +90,25 @@ class ActionHeadImitationTrainer:
         explore_search_kwargs: dict | None = None,
         build_interesting_points_kwargs: dict | None = None,
         train_value_head: bool = False,
-        # DAgger-style rollout policy (2026-09-01): None (default) keeps
-        # round-0-only behavior -- every rollout uses random_policy,
-        # unchanged. Set dagger_decay_rounds to phase in the ActionHead's
-        # own (stochastic, sample=True) rollout behavior instead, mixed
+        # DAgger-style rollout policy (2026-09-01, default flipped to ON
+        # 2026-09-01 -- user-directed: mixed rollouts should be the default,
+        # phased IN over random ones, not opt-in). "auto" (default) spans
+        # the mix over this trainer's own n_rollouts; an int overrides the
+        # span; None disables mixing entirely (pure round-0-only
+        # random_policy throughout, for ablations/back-compat). Mixed
         # per-instance against random_policy via a linearly-decaying beta
-        # (trainer.exit_rollout.mixed_policy_fn): beta(round) =
-        # max(dagger_beta_min, 1 - round/dagger_decay_rounds). Deliberately
+        # (trainer.exit_rollout.mixed_policy_fn): beta = P(random_policy)
+        # this rollout = max(dagger_beta_min, 1 - round/dagger_decay_rounds)
+        # -- starts at 1.0 (round 0: pure random, matching the round-0
+        # self-play seeding design) and decays toward dagger_beta_min
+        # (mostly self-generated, floor of permanent random exploration
+        # retained) as round -> dagger_decay_rounds. (Was inverted until
+        # 2026-09-01: random_policy and the ActionHead's own rollout were
+        # passed to mixed_policy_fn in the wrong order, so beta actually
+        # controlled P(self-generated) decaying FROM 1.0 -- i.e. round 0
+        # rolled out under an untrained ActionHead and phased OUT
+        # self-play over training, backwards from both this docstring's
+        # own stated intent and the round-0 self-play design.) Deliberately
         # NO persistent replay buffer alongside this -- every rollout still
         # draws a brand-new BNN instance (never revisited), so an old
         # buffer entry's context reflects an earlier, less-trained
@@ -101,7 +116,7 @@ class ActionHeadImitationTrainer:
         # each round's oracle labels are always computed fresh, against
         # that round's own context and x_int selection, then discarded
         # (same as before) -- see docs/log/ for the fuller reasoning.
-        dagger_decay_rounds: int | None = None,
+        dagger_decay_rounds: int | None | str = "auto",
         dagger_beta_min: float = 0.05,
         # Explore-step subsampling (2026-09-01, compute-cost finding: a
         # real-scale (x_dim=6) rollout showed explore-labeled steps
@@ -310,13 +325,24 @@ class ActionHeadImitationTrainer:
         torch.manual_seed(self.seed)
         opt = torch.optim.AdamW(self.action_head.parameters(), lr=self.lr)
         history = {"step": []}
+        # "auto" spans the phase-in over this run's own n_rollouts; an
+        # explicit int overrides that span; None disables mixing entirely.
+        decay_rounds = self.n_rollouts if self.dagger_decay_rounds == "auto" else self.dagger_decay_rounds
 
         for rollout_idx in range(self.n_rollouts):
             build_ip_kwargs = self.build_interesting_points_kwargs if "explore" in self.branches else None
 
             usage_counter = None
-            if self.dagger_decay_rounds is not None:
-                beta = max(self.dagger_beta_min, 1.0 - rollout_idx / self.dagger_decay_rounds)
+            if decay_rounds is not None:
+                # beta = P(random_policy) this rollout, decaying from 1.0
+                # (round 0: pure random, matching the round-0 self-play
+                # seeding design) down to dagger_beta_min (mostly
+                # self-generated, floor of permanent random exploration
+                # retained) as rollout_idx -> dagger_decay_rounds -- i.e.
+                # PHASES IN the ActionHead's own behavior over the run.
+                # random_policy is policy_a (mixed_policy_fn's usage_counter
+                # "a" key) so dagger/frac_self_generated below reads "b".
+                beta = max(self.dagger_beta_min, 1.0 - rollout_idx / decay_rounds)
                 usage_counter = {}
                 # Fresh action_head_policy_fn every rollout: it tracks its
                 # own step counter via closure state, which must start at 0
@@ -325,8 +351,9 @@ class ActionHeadImitationTrainer:
                 # not a greedy beta_mode -- avoids collapsing early
                 # self-play into narrow, repetitive trajectories.
                 policy_fn = mixed_policy_fn(
+                    random_policy,
                     action_head_policy_fn(self.action_head, self.pfn, self.n_steps, sample=True),
-                    random_policy, beta, usage_counter=usage_counter,
+                    beta, usage_counter=usage_counter,
                 )
             else:
                 beta = 1.0  # logged for consistency; round-0-only behavior is beta=1 (always random) throughout
@@ -377,7 +404,7 @@ class ActionHeadImitationTrainer:
                     "policy_nll/train": total_loss.item() / n_examples,
                     "n_examples/exploit": float(n_exploit),
                     "n_examples/explore": float(n_explore),
-                    "dagger/beta": beta,
+                    "dagger/beta": beta,  # P(random_policy) this rollout -- decays 1.0 -> dagger_beta_min
                     "policy/beta_entropy": (entropy_sum.item() / entropy_count) if entropy_count else float("nan"),
                 }
                 if grad_norm is not None:
@@ -387,9 +414,12 @@ class ActionHeadImitationTrainer:
                 if n_explore_examples:
                     metrics["explore/weighted_nll_reduction"] = explore_reduction_sum.item() / n_explore_examples
                 if usage_counter:
+                    # "a" = random_policy, "b" = the ActionHead's own
+                    # rollout (see the mixed_policy_fn call above) --
+                    # frac_self_generated is the "b" share.
                     total_actions = usage_counter.get("a", 0) + usage_counter.get("b", 0)
                     metrics["dagger/frac_self_generated"] = (
-                        usage_counter.get("a", 0) / total_actions if total_actions else float("nan")
+                        usage_counter.get("b", 0) / total_actions if total_actions else float("nan")
                     )
                 metrics.update(extra_metrics)
                 if "exploit" in self.branches:

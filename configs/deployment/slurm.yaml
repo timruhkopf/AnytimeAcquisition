@@ -1,9 +1,19 @@
-# Cluster-specific values you'll need to fill in — see docs/OPEN_QUESTIONS.md.
-# Actual SLURM resource requests (partition, gpus, timeout) are passed to the
-# hydra-submitit-launcher plugin via CLI overrides in scripts/submit.sh
-# (hydra.launcher.*), not read from here. Nothing in this repo currently
-# reads this config group at runtime (scripts/slurm/train.sbatch just does
-# `source .venv/bin/activate`, not conda -- see docs/OPEN_QUESTIONS.md #5) --
-# kept as a placeholder for cluster-specific values if that changes.
+# Cluster-specific values you'll need to fill in — see docs/OPEN_QUESTIONS.md
+# #4 (partition/account/QOS/time/GPU request -- still open, needs your real
+# allocation details). Those are passed to the hydra-submitit-launcher
+# plugin via CLI overrides in scripts/submit.sh (hydra.launcher.*), not read
+# from here. Nothing in this repo currently reads this config group at
+# runtime (scripts/slurm/train.sbatch just does `source .venv/bin/activate`,
+# not conda -- see docs/OPEN_QUESTIONS.md #5) -- kept as a placeholder for
+# cluster-specific values if that changes.
+#
+# Storage placement is resolved, though (docs/OPEN_QUESTIONS.md #6):
+# scripts/submit.sh/scripts/slurm/train.sbatch export
+# AA_PROJECT_ROOT=$BIGWORK/AnytimeAcquisition before dispatch, which is what
+# the ${aa_root:} resolver (src/anytimeacquisition/utils/paths.py) uses for
+# hydra.run.dir/hydra.sweep.dir (and therefore hydra-submitit-launcher's own
+# .submitit/ job-log dir, which nests under hydra.sweep.dir), checkpoint_path,
+# and MLflow's tracking dir alike -- not $HOME (LUIS's storage docs: unsuitable
+# for compute-job data) or $PROJECT (not mounted on compute nodes at all).
 name: slurm
 

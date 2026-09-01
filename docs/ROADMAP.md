@@ -230,6 +230,10 @@ other) is still open, see `docs/OPEN_QUESTIONS.md`. These are the reference
 points Phase 5's evaluation and Phase 5.5's RL extension both get measured
 against.
 
+Other important baselines to implement are random search, but more importantly 
+[direct regret optimization in Bayesian optimization](https://arxiv.org/abs/2507.06529)
+and [PABBO](https://arxiv.org/abs/2503.00924).
+
 ### Phase 5.5 — RL extension (design only, mapped out for review)
 
 **Not implemented yet — this section exists so the design can be reviewed
@@ -280,9 +284,7 @@ does transfer is the core Expert Iteration pattern — expensive,
 ground-truth-grounded search once, distilled into a fast generalizing
 network — which Phase 5 already implements.
 
-### Phase 7 — Consolidate / port back the rest of `archive/`
+### Phase 7 — RealWorld Benchmarking
 
-Once Phases 1–6 exist as real, working components (not scaffolds), sweep
-`archive/` for anything else worth deliberately porting — this is also
-where remaining bugs/issues in the old implementation get fixed rather than
-carried forward, per the original point of archiving instead of deleting.
+Once Phases 1–6 exist as real, working components (not scaffolds), We want to check how the incontext 
+acquistition capabilities work in the real world. 

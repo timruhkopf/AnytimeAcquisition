@@ -22,6 +22,15 @@ set -euo pipefail
 # have; sync once where there's internet, then just use the built venv.
 source .venv/bin/activate
 
+# Normally already set by scripts/submit.sh (sbatch exports the submitting
+# shell's environment into the job by default) -- this default only kicks
+# in if someone sbatch's this file directly. See there / docs/OPEN_QUESTIONS.md
+# #6 for why $BIGWORK, not $HOME or $PROJECT: outputs/, multirun/,
+# models/, and mlruns/ all resolve off AA_PROJECT_ROOT (via the ${aa_root:}
+# resolver), one lever for all of it rather than one per path.
+export AA_PROJECT_ROOT="${AA_PROJECT_ROOT:-${BIGWORK}/AnytimeAcquisition}"
+mkdir -p "${AA_PROJECT_ROOT}"
+
 MODULE="$1"
 shift
 

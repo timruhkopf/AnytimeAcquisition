@@ -68,9 +68,12 @@ action_head:
 # pipelines/action_head_imitation.py's main() -- x_dim from the checkpoint,
 # n_init/n_steps from trainer.n_init/n_steps, so they can't drift out of
 # sync with the actual run). every_n_steps=null means "use the trainer's
-# own log_every cadence" (see callbacks/handler.py) -- the AUC eval below
-# overrides it explicitly since a full 3-policy rollout comparison is much
-# more expensive than the other three checks.
+# own log_every cadence" (see callbacks/handler.py) -- every check below
+# overrides it explicitly to 50 instead (2026-09-01: explore_signal_rate
+# used to rely on the null/log_every default, but its uncapped
+# build_explore_buffer call is exactly as expensive as the other three
+# held-out checks, so it needs the same coarser cadence, not the trainer's
+# fine-grained one).
 action_head_validation:
   auc_eval:
     eval_batch_size: 8
@@ -104,4 +107,12 @@ action_head_validation:
   explore_signal_rate:
     eval_batch_size: 8
     eval_seed: 1002
-    every_n_steps: null
+    # Explicitly decoupled from trainer.log_every (2026-09-01, compute-cost
+    # fix) -- like held_out_l1/blind_ablation, this does an uncapped
+    # build_explore_buffer (no max_explore_steps_per_rollout subsampling),
+    # so it shouldn't fire at log_every's fine cadence (10 on
+    # action_head_imitation_explore_real.yaml -- was firing 5x more often
+    # than the other three held-out checks for no extra value, since it's
+    # largely redundant with the free, already-logged
+    # explore/signal_rate_train). Matches the others' cadence instead.
+    every_n_steps: 50
