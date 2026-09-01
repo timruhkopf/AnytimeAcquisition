@@ -316,10 +316,11 @@ def build_explore_signal_rate_callback(
             step_mask = is_explore[:, step_idx]
             if not step_mask.any():
                 continue
-            x_realized = rollout["x_context"][:, n_init + step_idx, :]
+            incumbent_idx = y_ctx.argmin(dim=1)
+            x_seed = x_ctx[torch.arange(x_ctx.shape[0]), incumbent_idx]  # context-visible seed, see search/explore.py
             _, _, has_signal = explore_search(
                 prior, trainer.pfn, trainer.bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"],
-                x_realized, **trainer.explore_search_kwargs,
+                x_seed, **trainer.explore_search_kwargs,
             )
             n_explore_labeled += int(step_mask.sum().item())
             n_with_signal += int((step_mask & has_signal).sum().item())

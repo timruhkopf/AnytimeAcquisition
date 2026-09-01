@@ -20,10 +20,11 @@ Mechanism, precisely:
      realized trajectory, applied here to a candidate set instead). Points
      already worse than the incumbent get weight 0 -- resolving uncertainty
      about them can't reduce regret.
-  3. Optimize a candidate query `x_explore` (multistart, random-only
-     restarts -- see `explore_search`'s "why not incumbent-seeded" note) to
-     minimize `sum_i weight_i * NLL(y_int_true_i | PPD at x_int_i given
-     x_explore added to context)`. `x_explore`'s y is teacher-forced from
+  3. Optimize a candidate query `x_explore` (multistart, seeded at the
+     incumbent -- see `explore_search`'s `x_seed` note, and
+     `docs/log/2026-09-01-explore-branch-beta-nll-uniform-collapse.md` for
+     why) to minimize `sum_i weight_i * NLL(y_int_true_i | PPD at x_int_i
+     given x_explore added to context)`. `x_explore`'s y is teacher-forced from
      the true BNN instance (`prior.evaluate(x_explore, noise=False)`,
      recomputed fresh every GD step so it always tracks the *current*
      `x_explore` -- never a stale or self-predicted value) -- the same
@@ -112,7 +113,7 @@ def explore_search(
     y_context: torch.Tensor,
     x_int: torch.Tensor,
     y_int_true: torch.Tensor,
-    x_realized: torch.Tensor,
+    x_seed: torch.Tensor,
     n_restarts: int = 1,
     n_steps: int = 30,
     lr: float = 0.05,
@@ -127,27 +128,49 @@ def explore_search(
     `torch.no_grad()` -- gradients must flow to `x_explore` through both
     `prior.evaluate` and the PFN's NLL computation.
 
-    `x_realized` [B, x_dim]: the point the rollout's *own* policy actually
-    played at this step (`rollout["x_context"][:, n_init+step, :]`, see
-    `trainer/exit_rollout.py::build_explore_buffer`) — every restart is
-    seeded there (2026-09-01, user-directed correction: this used to be a
-    fresh `torch.rand(...)` draw, discarding what was actually played
-    entirely; that made this an independent oracle search rather than a
-    genuine *correction* of the policy's own proposal, and doesn't extend
-    sensibly once rollouts run under a real policy instead of
-    `random_policy`, since a random draw is no longer a stand-in for "what
-    the policy would have done"). `n_restarts=1` by default (compute
-    budget: each restart is a full `n_steps`-length GD trajectory through
-    the PFN, and explore-labeled steps already vastly outnumber
-    exploit-labeled ones per rollout) — restarts beyond the first, if used,
-    get a small Gaussian position jitter (`init_noise_std`) around
-    `x_realized`, not a global random location; the earlier "random-only,
-    deliberately not incumbent-seeded" design (seeding near the
-    highest-weight point would reintroduce the collapse-toward-the-optimum
-    risk the weighting avoids at the objective level) no longer applies
-    once every restart is seeded at the realized action instead — that
-    action was never selected via anything correlated with the interesting
-    points' weights.
+    `x_seed` [B, x_dim]: where every restart is seeded — **the incumbent**
+    (`x_context[argmin(y_context)]`, see `trainer/exit_rollout.py::build_explore_buffer`)
+    as of 2026-09-01 (see `docs/log/2026-09-01-explore-branch-beta-nll-uniform-collapse.md`
+    for the full investigation this replaces). Previously seeded at
+    `x_realized`, the point the rollout's *own* policy actually played that
+    step — reasonable in spirit ("correct the policy's own proposal," not
+    an independent search), but under `random_policy` (round 0, and most of
+    a `dagger_decay_rounds` run given how slowly beta decays) `x_realized`
+    is literally `torch.rand(...)`, statistically independent of context.
+    Measured directly: `corr(x_star, x_realized) = 0.77` across 1283
+    explore-labeled examples, vs. `corr(x_star, incumbent_x) = -0.21` —
+    x_star was dominated by a quantity the ActionHead structurally cannot
+    observe (it only ever sees context), driving the trained policy to
+    collapse to a context-independent uniform Beta (exactly zero NLL for
+    any target when `alpha=beta=1`) rather than learning anything. The
+    incumbent is context-visible (literally `y_context.argmin()`), so this
+    removes that confound while keeping the same "stay local, don't
+    roam blind on a tiny context" property `x_realized`-seeding had — it's
+    a different context-anchored point, not a reversion to the earlier
+    "fresh independent random draw" design already rejected once (see the
+    log entry above and `docs/log/2026-08-28-explore-search-input-optimization-and-teacher-forcing.md`).
+    Known trade-off, not fully resolved: this loses "correct what the
+    policy actually proposed" for later, self-play-dominant rounds where
+    `x_realized` would itself be context-derived and arguably a better
+    anchor — deferred until the base learnability problem (this fix) is
+    confirmed, not solved simultaneously.
+
+    Note this is a *different* fixed point than seeding near the
+    highest-weight `x_int` point, which an earlier design explicitly
+    avoided ("collapse-toward-the-optimum risk the weighting avoids at the
+    objective level" — see the module docstring's point 3): `x_int` are
+    privileged points never in the training context, so seeding there
+    would bias the search toward reproducing what the weighting already
+    identifies as important, defeating its purpose. The incumbent is a
+    training-context point used purely as a local-search starting position,
+    same role `x_realized` played, not a proxy for "the answer."
+
+    `n_restarts=1` by default (compute budget: each restart is a full
+    `n_steps`-length GD trajectory through the PFN, and explore-labeled
+    steps already vastly outnumber exploit-labeled ones per rollout) —
+    restarts beyond the first, if used, get a small Gaussian position
+    jitter (`init_noise_std`) around `x_seed`, not a global random
+    location.
 
     -> (x_star [B, x_dim], weighted_nll_star [B], has_signal [B] bool --
     False where every interesting point's weight was already 0 for that
@@ -180,7 +203,7 @@ def explore_search(
     # treats R as just more query points per instance, no repeat needed
     # here; only the PFN calls need the repeated-row [B*R, ...] form, since
     # each restart needs its own separate augmented-context forward pass).
-    base = x_realized.unsqueeze(1).expand(B, n_restarts, x_dim)
+    base = x_seed.unsqueeze(1).expand(B, n_restarts, x_dim)
     if n_restarts > 1 and init_noise_std > 0:
         jitter = torch.cat([
             torch.zeros(B, 1, x_dim),
@@ -276,14 +299,12 @@ if __name__ == "__main__":
         nll_before = bar_dist(pfn(x_context, y_context, x_int), y_int_true)  # [B, N_int]
         weighted_nll_before = (weights * nll_before).sum(dim=-1)
 
-    # Standalone demo, no real rollout/policy here -- x_realized stands in
-    # for "whatever the policy actually played at this step" with a plain
-    # random draw (matching random_policy, round-0's own data-generating
-    # policy); a real caller passes the rollout's own realized next point
-    # (see trainer/exit_rollout.py::build_explore_buffer).
-    x_realized = torch.rand(prior.B, x_dim)
+    # Seed at the incumbent (context-visible) -- see trainer/exit_rollout.py::build_explore_buffer
+    # and docs/log/2026-09-01-explore-branch-beta-nll-uniform-collapse.md for why.
+    incumbent_idx = y_context.argmin(dim=1)
+    x_seed = x_context[torch.arange(prior.B), incumbent_idx]
     x_star, val_star, has_signal = explore_search(
-        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, x_realized, n_restarts=1, n_steps=30, lr=0.05,
+        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, x_seed, n_restarts=1, n_steps=30, lr=0.05,
     )
     print("has_signal per instance (False = weights all zero, result meaningless):", has_signal.tolist())
 

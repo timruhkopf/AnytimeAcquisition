@@ -290,12 +290,15 @@ def build_explore_buffer(
     added for it, same as `build_exploit_buffer` skipping steps with no
     exploit-labeled instances at all.
 
-    `explore_search` seeds its search at the point the rollout's own
-    policy actually played at each step (`rollout["x_context"][:,
-    n_init+step, :]`, `x_realized` below) rather than a fresh random draw
-    -- a genuine correction of what was played, not an independent oracle
-    search that ignores it (see `search.explore.explore_search`'s
-    docstring, 2026-09-01).
+    `explore_search` seeds its search at the incumbent (`x_seed` below,
+    `x_ctx[argmin(y_ctx)]`) — context-visible, unlike the point the rollout's
+    own policy actually played (`x_realized`, the previous seeding point,
+    2026-09-01: under `random_policy`, which dominates round 0 and most of
+    a `dagger_decay_rounds` run, that point is statistically independent of
+    context, which was driving the trained ActionHead to collapse to a
+    context-independent uniform Beta rather than learning anything — see
+    `search.explore.explore_search`'s docstring and
+    `docs/log/2026-09-01-explore-branch-beta-nll-uniform-collapse.md`).
 
     `steps`: optional allowlist of step indices to consider at all (other
     steps are skipped regardless of labeling) -- unset (default) considers
@@ -319,9 +322,10 @@ def build_explore_buffer(
         step_mask = is_explore[:, step]
         if not step_mask.any():
             continue
-        x_realized = rollout["x_context"][:, n_init + step, :]  # [B, x_dim] -- the point actually played at this step
+        incumbent_idx = y_ctx.argmin(dim=1)
+        x_seed = x_ctx[torch.arange(x_ctx.shape[0]), incumbent_idx]  # [B, x_dim] -- context-visible seed, see docstring above
         x_star, val_star, has_signal = explore_search(
-            prior, pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"], x_realized,
+            prior, pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"], x_seed,
             **explore_search_kwargs,
         )
         for b in torch.nonzero(step_mask & has_signal, as_tuple=False).squeeze(-1).tolist():
