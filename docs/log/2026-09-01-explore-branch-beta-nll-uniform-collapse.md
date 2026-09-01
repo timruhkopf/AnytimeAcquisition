@@ -332,13 +332,72 @@ network is being trained to faithfully reproduce a training signal that's
 only right about 1 in 5 times. Fixing the *learnability* of a noisy
 signal doesn't fix the noise.
 
+## Fix #3: minimal branch valuation (commit `aa7068f`)
+
+Implemented the cheap version discussed with the user: `build_explore_buffer`
+now computes the weighted-NLL-before value (same computation
+`_step_loss` already did purely for the `explore/weighted_nll_reduction`
+diagnostic) and gates on `val_star` actually being better than it, not
+just nonzero (`require_improvement=True`, default). Result, seeding+floor+valuation
+together, x_dim=1 (300 rollouts): `auc_improvement_vs_random/mean` across
+all 6 ticks: `[-2.70, -4.98, -5.27, -2.02, -3.97, -5.40]` — negative
+throughout, comparable to or slightly worse than floor-fix-alone
+(`l1/explore`/`blind_ratio` also similar, not a clear improvement). At
+x_dim=6 (300 rollouts): final `blind_ratio/explore≈1.00`,
+`l1/explore=1.58`, `auc_improvement_vs_random/mean=-36.6` — essentially
+back to collapsed-looking, no better than floor+seeding alone. **The
+valuation filter did not measurably help at either scale.**
+
+## The real problem: evaluating a marginal policy on a metric it was never trained for
+
+`callbacks.action_head_validation.build_auc_eval_callback` runs the
+trained policy for a **full** rollout, every step, via
+`action_head_policy_fn` — it does not distinguish exploit-eligible from
+explore-eligible steps; that partition is only known *after the fact*,
+from whether the incumbent happened to improve
+(`trainer.exit_rollout.label_branches`). A marginal **explore-only**
+trainer, by construction, only ever sees training examples from flat
+(non-improving) steps — `n_examples/exploit: 0.0` in literally every
+logged tick of every explore-only run this session, including all three
+"fixed" variants above. It has **zero** training signal for what to do
+at a step where its own rollout just improved the incumbent (an
+exploit-eligible moment) — and those moments still occur constantly
+during a full deployed rollout; the network has to act there anyway, out
+of distribution, every single time.
+
+This means a marginal explore-only policy's ceiling on full-rollout AUC
+is capped by how it handles situations it was never trained for, **independent
+of how good its actual explore-specific behavior is**. All three fixes in
+this log measurably improved the explore branch's own training quality
+(`l1/explore` down, `blind_ratio/explore` < 1, entropy no longer pinned
+at the uniform floor) without ever moving `auc_improvement_vs_random`
+into positive territory, at either scale — consistent with this being a
+*mismatch between what a marginal trainer teaches and what a full-rollout
+eval tests*, not a remaining defect in the explore branch itself. The
+exploit branch's own control experiment (this log, "Result") was never
+checked against full-rollout AUC in isolation — only step-level
+diagnostics — so it's untested whether it shows the same asymmetry in
+reverse; plausible by the same mechanism, not confirmed.
+
+**This is the acceptance criterion's own scope issue, not the explore
+branch's.** `docs/milestones/M5.md`'s bar (`auc_improvement_vs_random/mean > 0`)
+is fair to apply to the **integrated** (exploit+explore) policy — the
+setting the original `archive/src/exit/PFN_ActionHead_ExpertIteration_Design.md`
+actually evaluates (§4: "track log-incumbent AUC... across rounds" for
+the combined system, never a marginal single-branch ablation) — not to a
+marginal explore-only one.
+
 ## Status / next steps
 
-**Root cause chain understood, two of three contributing issues fixed
-and confirmed real, acceptance criterion still not met at either scale.**
-Not continuing to unilaterally build the missing branch-valuation
-mechanism — it's a substantial feature (value-head training, a rollout-
-based validation/filtering step in `build_exploit_buffer`/
-`build_explore_buffer`, config wiring), not a bug fix, and needs a
-decision, not more solo iteration. Reported back to the user with this
-log for that decision.
+**Root cause chain understood, three real issues found and fixed on this
+branch** (DAgger schedule inversion, `x_realized`→incumbent seeding,
+`alpha_beta_floor` 1.0→2.0, minimal branch valuation) — all three
+genuinely improve the explore branch's own training quality, confirmed
+via `l1/explore`/`blind_ratio/explore`/entropy, not just asserted.
+**None of them, alone or combined, gets a marginal explore-only policy to
+beat random search on full-rollout AUC** — and per the section above,
+that specific test was likely never a fair one to run against a marginal
+policy in the first place. Pivoting the remaining validation to the
+**integrated** (exploit+explore) trainer, which is both the fair test of
+these fixes and the actual target configuration — launching a long
+(overnight) real-scale run with all fixes active, per the user's request.
