@@ -147,29 +147,73 @@ wasn't directly tested (would need e.g. a longer run, or a fast-vs-slow
 `dagger_decay_rounds` comparison) and is flagged as the natural next
 experiment, not concluded here.
 
-## Status / next steps
+## Fix: seed at the incumbent instead of `x_realized`
 
-**Root cause identified, not yet fixed.** Candidate directions (not
-mutually exclusive, none implemented yet — needs a decision, not more
-diagnosis):
+Chosen over the other three candidates below (commit `bd9d1de`, branch
+`explore-entropy-collapse`): `explore_search`'s restart seed changed from
+`x_realized` to the incumbent (`x_context[argmin(y_context)]`) — the same
+context-visible anchor `exploit_search` already uses, which the control
+run above proved trains cleanly. Keeps the "stay local, don't roam blind
+on a tiny context" property `x_realized`-seeding had (a different
+context-anchored point, not a reversion to the earlier "fresh independent
+random draw" design already rejected once, see
+`docs/log/2026-08-28-explore-search-input-optimization-and-teacher-forcing.md`).
+Renamed the parameter `x_realized` -> `x_seed` throughout
+(`search/explore.py`, `trainer/exit_rollout.py::build_explore_buffer`,
+`callbacks/action_head_validation.py::build_explore_signal_rate_callback`).
+Known open trade-off: loses "correct what the policy actually proposed"
+for later, self-play-dominant rounds — deferred, see "Open follow-ups"
+below.
 
-1. Downweight or delay explore-example collection until `dagger/beta` has
-   decayed past some threshold (self-play meaningfully dominant), instead
-   of training on it from rollout 0 -- directly cuts the volume of
-   `x_realized`-dominated noisy targets the network ever has to reconcile
-   against later, better data.
-2. Re-open `explore_search`'s seeding choice specifically for early/
-   high-beta rounds (e.g. blend `x_realized` with a context-derived point)
-   -- in tension with the 2026-08-28/2026-09-01 design history that
-   deliberately moved *toward* `x_realized`-seeding for a different,
-   still-valid reason (genuine correction of what was played); revisiting
-   it needs to preserve that reasoning for the self-play-dominant regime,
-   not just revert it wholesale.
-3. Test whether a much longer run, or a faster `dagger_decay_rounds`
-   (self-play dominant much earlier), actually escapes the basin once
-   reached -- the flat `l1/explore` trend above suggests "just train
-   longer" alone may not be enough, but this wasn't directly isolated.
-4. Curriculum: warm-start the ActionHead's shared blocks on the (cleanly
-   learnable) exploit branch before ever training on explore targets.
+**Acceptance criterion** (added to `docs/milestones/M5.md`): held-out
+`auc_improvement_vs_random/mean > 0` (the project's own north-star metric,
+`callbacks.action_head_validation.build_auc_eval_callback`), sustained
+over the last 3 logged eval ticks.
 
-Reported back to the user with this log for the next-step decision.
+**Result at x_dim=1** (`action_head_imitation_explore_smoke.yaml`, 300
+rollouts, otherwise unchanged from the pre-fix run above — direct
+before/after comparison):
+
+```
+                              before fix          after fix
+policy_nll/train (final)      +0.005              -0.172   (was NEVER negative in 300 rollouts;
+                                                              after fix, negative from rollout 10 on)
+policy/beta_entropy trend     flat at ~0.00        diverges: -0.08 -> -0.46 (final)
+l1/explore (last 6 ticks)     .32/.28/.32/.30/.27/.32   .20/.27/.22/.20/.17/.21
+blind_ratio/explore (last 6)  1.05/.95/.92/.96/.95/.94  1.12/1.28/1.00/.89/.82/.89
+auc/action_head (final)       -12.06 (worse than random)   -19.39 (better than random)
+auc_improvement_vs_random     -3.33...-6.40 (always neg.)  -4.97,-0.77,1.56,2.39,1.62,0.93
+  (all 6 ticks)                                            (last 3: all positive)
+```
+
+**Acceptance criterion MET at x_dim=1**: last 3 ticks of
+`auc_improvement_vs_random/mean` are `[2.39, 1.62, 0.93]`, all positive
+— action_head beats random search, sustained, not a single lucky tick.
+Direct `alpha`/`beta` inspection was skipped this round (the AUC/entropy/
+blind_ratio trends already tell a consistent, unambiguous story) but would
+be a natural sanity re-check if this result needs re-litigating later.
+
+**Real-scale (x_dim=6) confirmation**: launched on `ulysses` directly via
+SSH (not through PyCharm's interpreter, to avoid the `/tmp/pycharm_project_*`
+staging confusion — see `scripts/mlflow_tunnel_ulysses.sh`'s own
+documented gotcha) —
+`action_head_imitation_explore_real.yaml` against `pfn_variable_xdim_smoke.pt`,
+branch `explore-entropy-collapse` @ `bd9d1de`, checkpoint at
+`models/explore_seedfix_xdim6.pt`. *Result pending at time of writing --
+update this section once it has enough eval ticks (every 50 rollouts) to
+assess the same criterion.*
+
+## Open follow-ups (not yet needed, not yet done)
+
+- Does `blind_ratio/explore` and `auc_improvement_vs_random` keep
+  improving with more rollouts, or plateau/regress like the entropy trend
+  hints it might still be finding its footing? Only 300 rollouts tested at
+  x_dim=1 so far.
+- The "correct what the policy actually proposed" property lost by moving
+  off `x_realized`-seeding — worth revisiting once self-play reliably
+  dominates a run (e.g. gate seeding: incumbent early, `x_realized` once
+  `dagger/beta` is low), not before.
+- `n_restarts=1` (compute-budget default) was deliberately left unchanged
+  in this fix to isolate the seed-point variable — bumping it is a
+  plausible follow-up if real-scale (x_dim=6) results show the local GD
+  search under-reaching from the incumbent.
