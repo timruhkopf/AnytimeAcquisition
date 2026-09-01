@@ -268,6 +268,7 @@ def build_exploit_buffer(
 def build_explore_buffer(
     prior: BNNPrior, pfn: PFN, bar_dist: BarDistribution, rollout: dict, n_init: int,
     explore_search_kwargs: dict | None = None, steps: set[int] | None = None,
+    require_improvement: bool = True,
 ) -> list[ImitationExample]:
     """Runs `explore_search` at every explore-labeled (instance, step) pair
     (the complement of `label_branches` -- flat steps) and collects the
@@ -300,6 +301,34 @@ def build_explore_buffer(
     `search.explore.explore_search`'s docstring and
     `docs/log/2026-09-01-explore-branch-beta-nll-uniform-collapse.md`).
 
+    `require_improvement=True` (default, 2026-09-01, minimal "branch
+    valuation" per `archive/src/exit/PFN_ActionHead_ExpertIteration_Design.md`
+    §4 step 3 -- see the log entry above): also skips any (instance, step)
+    pair where `explore_search`'s own achieved value (`val_star`, weighted
+    NLL after adding `x_star`) is not actually BETTER than the weighted NLL
+    before -- i.e., discards corrections that made things worse, not just
+    ones with zero signal. Unlike `exploit_search` (which structurally
+    cannot regress: it falls back to the known incumbent whenever every
+    restart fails to beat it), `explore_search` has no such guarantee --
+    its own docstring is explicit that "no privileged known-good x exists
+    to fall back to here." Before this gate, ALL corrections were trusted
+    as imitation targets regardless of quality; `docs/milestones/M5.md`'s
+    own earlier finding (only 18.5% of individual explore corrections
+    strictly reduce true regret, 14.3% make it worse) is direct evidence
+    that an unfiltered BC objective was being trained toward a
+    net-harmful-about-as-often-as-helpful signal. Not a full AlphaZero-style
+    value-head/rollout valuation (`train_value_head` still off by default,
+    no rollout continuation) -- reuses the SAME before/after weighted-NLL
+    computation `trainer.action_head_imitation_trainer._step_loss` already
+    did purely for diagnostics (`explore/weighted_nll_reduction`), now
+    applied as an actual gate rather than just logged after the fact. The
+    0.86 correlation between weighted-NLL improvement and true regret
+    reduction (`pipelines/explore_search_playground.py`'s own finding,
+    cited in `docs/milestones/M5.md`) is why this cheap proxy is expected
+    to capture most of the value of a full valuation step without the
+    extra rollout/value-head machinery. Set False to recover the old
+    (unfiltered) behavior for comparison/ablation.
+
     `steps`: optional allowlist of step indices to consider at all (other
     steps are skipped regardless of labeling) -- unset (default) considers
     every step, unchanged from before. Used by
@@ -328,6 +357,13 @@ def build_explore_buffer(
             prior, pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"], x_seed,
             **explore_search_kwargs,
         )
+        if require_improvement:
+            with torch.no_grad():
+                incumbent_val = y_ctx.min(dim=1).values
+                weights = improvement_weights(incumbent_val, rollout["y_int_true"])
+                nll_before = bar_dist(pfn(x_ctx, y_ctx, rollout["x_int"]), rollout["y_int_true"])
+                weighted_before = (weights * nll_before).sum(dim=-1)
+            has_signal = has_signal & (val_star < weighted_before)
         for b in torch.nonzero(step_mask & has_signal, as_tuple=False).squeeze(-1).tolist():
             buffer.append(ImitationExample(
                 x_context=x_ctx[b].clone(), y_context=y_ctx[b].clone(),

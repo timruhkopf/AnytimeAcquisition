@@ -216,6 +216,11 @@ class ActionHeadImitationTrainer:
             )
             examples += explore_examples
             n_eligible_selected = sum(int(is_explore[:, s].sum().item()) for s in selected)
+            # Now reflects BOTH build_explore_buffer gates (2026-09-01):
+            # has_signal (zero-weight x_int set) AND require_improvement
+            # (correction didn't actually reduce weighted NLL) -- naturally
+            # drops further than before that second gate existed, that's
+            # the fix working as intended, not a regression.
             extra["explore/signal_rate_train"] = (
                 len(explore_examples) / n_eligible_selected if n_eligible_selected else float("nan")
             )
