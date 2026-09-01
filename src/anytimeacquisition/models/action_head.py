@@ -61,10 +61,22 @@ The policy/value heads below are a **provisional single-Beta-per-dimension
 placeholder**, gated as such in `docs/milestones/M4.md`: the real
 single-vs-mixture decision needs the multimodality diagnostic (design doc
 Sec. 4.2/8, stage 1), which has not been run yet (explicit user call,
-2026-08-28). Alpha/beta are clamped via `softplus(x) + 1.0`, matching the
+2026-08-28). Alpha/beta are clamped via `softplus(x) + alpha_beta_floor`, matching the
 NaN-gradient-instability fix `archive/src/prototype/other_diff/README.md`
-already found necessary for a Beta head. Good enough to smoke-test the
-cross-attention pathway; not the final head.
+already found necessary for a Beta head. `alpha_beta_floor` defaults to
+2.0, not 1.0 (2026-09-01, see
+`docs/log/2026-09-01-explore-branch-beta-nll-uniform-collapse.md`'s
+"Reopening the loss itself" section): at floor=1.0, `Beta(1,1)` is the
+*exact* uniform distribution, whose density is exactly 1 everywhere on
+`[0,1]` -- meaning `-log_prob(target) = 0` for literally any target, a
+zero-cost escape hatch the explore-branch imitation trainer's Beta-NLL
+loss (`trainer/action_head_imitation_trainer.py::_beta_nll_loss`) was
+found collapsing into even when its training target was genuinely
+context-dependent. At floor=2.0, `Beta(2,2)` is NOT uniform (density
+varies with the target), so "give up and predict the floor" no longer
+gives exactly-zero loss -- there's a real, non-negligible cost to
+retreating there, not just a cheaper-than-informative one. Good enough to
+smoke-test the cross-attention pathway; not the final head.
 """
 import torch
 import torch.nn as nn
@@ -142,9 +154,11 @@ class ActionHead(nn.Module):
     def __init__(
         self, pfn_d_model: int, pfn_n_layers: int, x_dim: int,
         d_model: int = 64, n_heads: int = 4, d_ff: int = 128, dropout: float = 0.0,
+        alpha_beta_floor: float = 2.0,
     ):
         super().__init__()
         self.x_dim = x_dim
+        self.alpha_beta_floor = alpha_beta_floor
         self.action_query = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.aux_embed = nn.ModuleDict({name: nn.Linear(1, d_model) for name in AUX_FEATURE_NAMES})
         self.blocks = nn.ModuleList([
@@ -161,7 +175,7 @@ class ActionHead(nn.Module):
         """x_train: [B,Ntr,x_dim]  y_train: [B,Ntr]
         aux_features: dict of the 4 AUX_FEATURE_NAMES -> [B] tensors.
         -> {"alpha": [B,x_dim], "beta": [B,x_dim], "value": [B]}, alpha/beta
-        both >= 1 (see module docstring). Gradients never reach `pfn`'s
+        both >= `self.alpha_beta_floor` (see module docstring). Gradients never reach `pfn`'s
         parameters -- frozen + forward under `torch.no_grad()` below; see
         `tests/test_action_head.py::test_pfn_gradients_are_none_after_backward`.
 
@@ -209,16 +223,20 @@ class ActionHead(nn.Module):
         h = self.out_ln(h)
         action_repr = h[:, 0, :]  # the action-query token's own final state, read out here -- see note above
         alpha_beta = self.policy_head(action_repr).view(B, self.x_dim, 2)
-        alpha = F.softplus(alpha_beta[..., 0]) + 1.0
-        beta = F.softplus(alpha_beta[..., 1]) + 1.0
+        alpha = F.softplus(alpha_beta[..., 0]) + self.alpha_beta_floor
+        beta = F.softplus(alpha_beta[..., 1]) + self.alpha_beta_floor
         value = self.value_head(action_repr).squeeze(-1)
         return {"alpha": alpha, "beta": beta, "value": value}
 
 
 def beta_mode(alpha: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
-    """alpha, beta >= 1 always holds for `ActionHead`'s own output (softplus+1
-    clamp), so the mode is always defined: (alpha-1)/(alpha+beta-2), with the
-    alpha=beta=1 (uniform) edge case mapped to 0.5. Shared here (not just
+    """alpha, beta >= 1 always holds for `ActionHead`'s own output
+    (`softplus(x) + alpha_beta_floor`, `alpha_beta_floor >= 1` by
+    construction/default), so the mode is always defined:
+    (alpha-1)/(alpha+beta-2), with the alpha=beta=1 (uniform) edge case
+    mapped to 0.5 -- unreachable in practice when `alpha_beta_floor > 1`
+    (the default, 2.0), kept as a defensive fallback for `alpha_beta_floor=1.0`
+    callers/older checkpoints. Shared here (not just
     `pipelines/action_head_posterior_distill.py`, the first caller) since
     `action_head_policy_fn` below needs it too."""
     denom = alpha + beta - 2.0
