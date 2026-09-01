@@ -196,24 +196,149 @@ be a natural sanity re-check if this result needs re-litigating later.
 **Real-scale (x_dim=6) confirmation**: launched on `ulysses` directly via
 SSH (not through PyCharm's interpreter, to avoid the `/tmp/pycharm_project_*`
 staging confusion — see `scripts/mlflow_tunnel_ulysses.sh`'s own
-documented gotcha) —
-`action_head_imitation_explore_real.yaml` against `pfn_variable_xdim_smoke.pt`,
-branch `explore-entropy-collapse` @ `bd9d1de`, checkpoint at
-`models/explore_seedfix_xdim6.pt`. *Result pending at time of writing --
-update this section once it has enough eval ticks (every 50 rollouts) to
-assess the same criterion.*
+documented gotcha) — `action_head_imitation_explore_real.yaml` against
+`pfn_variable_xdim_smoke.pt`, branch `explore-entropy-collapse` @ `bd9d1de`,
+300 rollouts, checkpoint at `models/explore_seedfix_xdim6.pt`. **Still
+collapsed**: `policy/beta_entropy` flat at ~0.00 from tick 2 on (same
+signature as the pre-fix run), `l1/explore` flat ~1.68-1.75,
+`auc_improvement_vs_random/mean` strongly negative every tick (-37 to
+-52). The seeding fix alone did not transfer to real scale.
 
-## Open follow-ups (not yet needed, not yet done)
+## Retraction: the x_dim=1 "criterion met" claim didn't survive scrutiny
 
-- Does `blind_ratio/explore` and `auc_improvement_vs_random` keep
-  improving with more rollouts, or plateau/regress like the entropy trend
-  hints it might still be finding its footing? Only 300 rollouts tested at
-  x_dim=1 so far.
-- The "correct what the policy actually proposed" property lost by moving
-  off `x_realized`-seeding — worth revisiting once self-play reliably
-  dominates a run (e.g. gate seeding: incumbent early, `x_realized` once
-  `dagger/beta` is low), not before.
-- `n_restarts=1` (compute-budget default) was deliberately left unchanged
-  in this fix to isolate the seed-point variable — bumping it is a
-  plausible follow-up if real-scale (x_dim=6) results show the local GD
-  search under-reaching from the incumbent.
+User pushback (correctly): the training run's own 6 AUC-eval ticks all
+reuse the SAME fixed 8 held-out instances (`eval_seed=999`) — "3
+consecutive positive ticks" isn't 3 independent trials, and 1D is exactly
+where random search is hardest to beat anyway. Re-evaluated the trained
+x_dim=1 checkpoint properly:
+
+```
+same eval_seed=999, n=8  (sanity check): improvement mean=0.70  95% CI=[-2.46, 3.87]  -- includes 0
+DIFFERENT eval_seed=2027, n=40 (real test): improvement mean=-1.82 95% CI=[-4.23, 0.58] -- negative, includes 0
+  fraction of instances action_head beat random: 0.375 (worse than a coin flip)
+```
+
+**Correction: the acceptance criterion was NOT met at x_dim=1 either.**
+The seeding fix's genuine, unambiguous achievement is fixing the *training
+dynamics* (negative NLL, diverging entropy, blind_ratio < 1 — all real,
+reproduced below) — it did not, on its own, produce a policy that
+robustly beats random search.
+
+## Reach diagnostic at x_dim=6: the seeding fix's target IS genuinely informative
+
+Before assuming "search doesn't reach far enough from the incumbent in
+6-D" explains the x_dim=6 non-transfer, measured it directly (10 fresh
+`random_policy` rollouts, real config's own `n_restarts=1, n_steps=15`):
+
+```
+n examples: 6064
+mean ||x_star - x_seed|| (L2, 6 dims): 0.6181   (vs. max possible ~2.449)
+mean |x_star - x_seed| per-dim: 0.2025
+var(x_star) per-dim ≈ var(x_seed) per-dim ≈ 0.089;  var(delta) per-dim: 0.070
+corr(x_star, x_seed) per dim: 0.52-0.66   (vs. 0.77 for the broken x_realized case)
+```
+
+The search moves substantially and produces a target only moderately
+correlated with its seed — genuinely context-informative, not "incumbent
+plus noise." Ruled out: this isn't a search-reach problem. The remaining
+collapse points at the loss's own optimization dynamics, not target
+quality — see the floor fix below.
+
+## Fix #2: raise the alpha/beta floor from 1.0 to 2.0
+
+Commit `653002e`. At floor=1.0, `Beta(1,1)` is *exactly* uniform — density
+exactly 1 everywhere on `[0,1]`, so `-log_prob(target)=0` for any target,
+a literal zero-cost point reachable regardless of how many dimensions the
+policy_head has to jointly solve. At floor=2.0, `Beta(2,2)` is not
+uniform — retreating to the floor no longer eliminates loss. Exploit's
+own already-learned `alpha`/`beta` (observed up to ~5.4) sit comfortably
+above 2.0, so exploit shouldn't regress (not separately re-verified this
+round — flagged as a follow-up).
+
+Re-ran the x_dim=1 comparison (300 rollouts, otherwise identical):
+
+```
+                          seeding-fix only     + floor=2.0
+policy_nll/train (final)  -0.172               -0.841   (both negative; floor version more so)
+policy/beta_entropy       -0.08 -> -0.46        -0.23 -> -0.14 (noisier, but never returns to ~0.00)
+l1/explore (6 ticks)      .20/.27/.22/.20/.17/.21    .21/.29/.10/.10/.08/.09  (clearly, consistently better)
+blind_ratio/explore       1.12/1.28/1.00/.89/.82/.89 1.05/.97/.84/1.10/.64/.77 (lower, more consistently <1)
+auc_improvement_vs_random -4.97,-0.77,1.56,2.39,1.62,0.93 (all 6 ticks)  -6.43,-5.36,-5.36,-1.79,-3.43,-3.11
+                          (looked positive, later shown not significant)  (consistently negative, smaller magnitude
+                                                                            than pre-any-fix, but still negative)
+```
+
+The floor fix's per-rollout training loss was also visibly *more volatile*
+(large swings, e.g. 3.18, 2.15, 2.46, 1.97 interspersed with negative
+dips) rather than either cleanly collapsed or cleanly converging —
+consistent with a network now actually grappling with fitting inconsistent
+per-step targets instead of retreating to the free uniform answer.
+
+**The decisive read**: `l1/explore` and `blind_ratio/explore` — both
+direct measures of "does the network accurately reproduce the oracle's
+own `x_star`" — improved clearly and consistently with the floor fix. But
+`auc_improvement_vs_random` stayed negative regardless. This separates two
+previously-conflated questions: *can the network learn the oracle's
+target* (yes, now — both fixes together resolve this) vs. *is the
+oracle's target itself good enough to produce a policy that beats random
+search* (no, unresolved by either fix).
+
+## Where the real gap is: a design-doc-documented step was never built
+
+Per the user's suggestion, re-read `archive/src/exit/PFN_ActionHead_ExpertIteration_Design.md`
+(§4, step 3, "Branch valuation") — the original Expert Iteration design
+this repo is built from. It does **not** directly imitate a raw oracle
+search result. Every candidate correction is scored with "a short, cheap
+rollout... plus the current value head's bootstrapped estimate for
+whatever trajectory remains" (the AlphaZero-style move) *before* it's
+added to the training buffer. This repo's `build_exploit_buffer`/
+`build_explore_buffer` skip that step entirely — whatever
+`exploit_search`/`explore_search` returns is treated directly as ground
+truth, unfiltered. `train_value_head` (the thing that would make
+valuation possible) defaults to `False` and is unset in every existing
+config.
+
+This isn't a new concern invented today — `docs/milestones/M5.md`'s own
+earlier regret-validation finding already measured the consequence: only
+**18.5%** of individual explore corrections strictly reduced regret
+(14.3% made it worse). Both fixes landed today make the network *learn
+that signal faithfully* (proven: `l1/explore` down, `blind_ratio` < 1) —
+neither fix changes the fact that the signal being learned is right about
+1 in 5 times, unfiltered. That is a plausible, well-evidenced explanation
+for why a demonstrably-non-collapsed, accurately-fitting policy still
+doesn't beat random search.
+
+## What we learned
+
+Three real, distinct issues, all confirmed empirically, not just
+theorized:
+1. DAgger's rollout-mixing schedule was inverted (fixed, unrelated to
+   this specific investigation — see commit `1b8f179`).
+2. `explore_search` seeded at a quantity independent of context under
+   `random_policy` (`x_realized`), making its target partly unlearnable
+   in principle — fixed by seeding at the incumbent instead (`bd9d1de`).
+   Confirmed real (training dynamics genuinely changed) but **not
+   sufficient on its own** to produce a policy that beats random search,
+   and did not transfer to x_dim=6 at all.
+3. The Beta-NLL loss's `alpha=beta=1` floor gave a literal zero-cost
+   "give up" point regardless of target quality, independent of (2) --
+   raising it to 2.0 (`653002e`) makes the network demonstrably learn the
+   oracle's target faithfully. Still not sufficient: `l1`/`blind_ratio`
+   improve, `auc_improvement_vs_random` does not.
+
+The likely dominant remaining gap is (per the reference design) the
+missing branch-valuation/value-head-bootstrap step — without it, the
+network is being trained to faithfully reproduce a training signal that's
+only right about 1 in 5 times. Fixing the *learnability* of a noisy
+signal doesn't fix the noise.
+
+## Status / next steps
+
+**Root cause chain understood, two of three contributing issues fixed
+and confirmed real, acceptance criterion still not met at either scale.**
+Not continuing to unilaterally build the missing branch-valuation
+mechanism — it's a substantial feature (value-head training, a rollout-
+based validation/filtering step in `build_exploit_buffer`/
+`build_explore_buffer`, config wiring), not a bug fix, and needs a
+decision, not more solo iteration. Reported back to the user with this
+log for that decision.
