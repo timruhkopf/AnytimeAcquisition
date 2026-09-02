@@ -150,16 +150,21 @@ def plot_ei_diagnostic(
     pfn: PFN, bar_dist: BarDistribution, action_head: ActionHead, prior: BNNPrior,
     n_contexts: int = 4, n_train: int = 10, n_grid: int = 1000, seed: int = 12345,
 ):
-    """A small grid of held-out-context subplots, each showing the
-    ground-truth EI curve, its argmax, and the trained ActionHead's own
-    `beta_mode` prediction overlaid -- the direct visual check "did the
-    policy converge near the true argmax", not just an aggregate L1
-    number. -> matplotlib Figure (caller saves/logs it)."""
+    """A small grid of held-out-context subplots, two rows per context:
+    top = the frozen PFN's own posterior over the grid, decoded from its
+    logits (mean +/- std, plus the context points and incumbent) -- "the
+    logits of the pfn" this diagnostic is meant to expose, not just the
+    downstream EI number; bottom = the ground-truth EI curve, its argmax,
+    and the trained ActionHead's own `beta_mode` prediction overlaid -- the
+    direct visual check "did the policy converge near the true argmax",
+    not just an aggregate L1 number. -> matplotlib Figure (caller
+    saves/logs it)."""
     torch.manual_seed(seed)
-    fig, axes = plt.subplots(1, n_contexts, figsize=(4 * n_contexts, 3.5), sharey=True)
+    fig, axes = plt.subplots(2, n_contexts, figsize=(4 * n_contexts, 6), sharex=True)
     if n_contexts == 1:
-        axes = [axes]
-    for i, ax in enumerate(axes):
+        axes = axes.reshape(2, 1)
+    for i in range(n_contexts):
+        ax_post, ax_ei = axes[0, i], axes[1, i]
         prior.reset()
         x_train, y_train, _, _ = prior.sample_episode(n_train=n_train, n_test=0)
         x_star, grid, ei_grid = pfn_ei_argmax(pfn, bar_dist, x_train, y_train, n_grid=n_grid)
@@ -167,16 +172,29 @@ def plot_ei_diagnostic(
         with torch.no_grad():
             out = action_head(pfn, x_train, y_train, aux, blind=False)
             pred = beta_mode(out["alpha"], out["beta"])
+            grid_batched = grid.unsqueeze(0).expand(x_train.shape[0], -1, -1)
+            logits_grid = pfn(x_train, y_train, grid_batched)  # [B, n_grid, n_bins] -- "the logits of the pfn"
+            mean_grid = bar_dist.mean(logits_grid)[0]
+            std_grid = bar_dist.variance(logits_grid)[0].clamp_min(0.0).sqrt()
+        incumbent = y_train.min(dim=1).values[0].item()
 
-        ax.plot(grid.squeeze(-1), ei_grid[0], color="tab:orange", label="EI(x)")
-        ax.axvline(x_star[0].item(), color="tab:red", linestyle="--", label="EI argmax")
-        ax.axvline(pred[0, 0].item(), color="tab:blue", linestyle=":", label="ActionHead")
-        ax.scatter(x_train[0, :, 0], torch.zeros_like(x_train[0, :, 0]), color="black", marker="x", s=15)
-        ax.set_title(f"context {i}")
-        ax.set_xlabel("x")
+        x_axis = grid.squeeze(-1)
+        ax_post.plot(x_axis, mean_grid, color="tab:green", label="PFN mean")
+        ax_post.fill_between(x_axis, mean_grid - std_grid, mean_grid + std_grid, color="tab:green", alpha=0.2)
+        ax_post.scatter(x_train[0, :, 0], y_train[0], color="black", marker="x", s=15, label="context")
+        ax_post.axhline(incumbent, color="gray", linestyle="--", linewidth=1, label="incumbent")
+        ax_post.set_title(f"context {i}")
+
+        ax_ei.plot(x_axis, ei_grid[0], color="tab:orange", label="EI(x)")
+        ax_ei.axvline(x_star[0].item(), color="tab:red", linestyle="--", label="EI argmax")
+        ax_ei.axvline(pred[0, 0].item(), color="tab:blue", linestyle=":", label="ActionHead")
+        ax_ei.scatter(x_train[0, :, 0], torch.zeros_like(x_train[0, :, 0]), color="black", marker="x", s=15)
+        ax_ei.set_xlabel("x")
         if i == 0:
-            ax.set_ylabel("EI")
-            ax.legend(fontsize=8)
+            ax_post.set_ylabel("y (PFN posterior)")
+            ax_post.legend(fontsize=8)
+            ax_ei.set_ylabel("EI")
+            ax_ei.legend(fontsize=8)
     fig.tight_layout()
     return fig
 
