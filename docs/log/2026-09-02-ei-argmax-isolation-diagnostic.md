@@ -85,36 +85,69 @@ here to argmax-finding instead of credit assignment.
 
 ## Result
 
-**Not yet available.** Only a tiny (20-step) local CPU smoke test has been
-run so far — confirms the pipeline runs end to end, logs to MLflow
-correctly, no shape/correctness issues (11/11 unit tests pass, including
-the Monte Carlo cross-check of the EI formula and a check that the
-EI-argmax target genuinely differs from the easier posterior-mean-argmin
-one). That smoke run's own verdict (`INCONCLUSIVE/FAIL`, `real_eval_l1`
-barely below `blind_eval_l1`) is **not evidence of anything** — 20 steps
-is far too few to expect convergence either way; it is not a real-scale
-result. A real-scale run is being dispatched to `ulysses`
-(see this repo's `CLAUDE.md` for what that machine is) as of this entry.
+**Real-scale run on `ulysses` (x_dim=1, `pfn_smoke_xdim1.pt`,
+`memorize_steps=300 generalize_steps=2000 eval_contexts=100 n_grid=1000`,
+`priors.batch_size=16`, `ActionHead` defaults):**
 
-This section, and "What we learned" below, get filled in once that real
-run's `real_eval_l1`/`blind_eval_l1`/pass-fail numbers exist, or once the
-`ActionHead` architecture has been iterated on (per
-`docs/log/2026-09-02-actionhead-search-depth-design-options.md`'s
-K-candidate-token / recursive-refinement / flow-matching options) to
-actually meet what this experiment demands — appended, per this log's own
-append-only convention, not rewritten in place.
+```
+memorize final loss:            5.4987 -> 0.2318
+generalize (real)  held-out L1: 0.1745
+generalize (blind) held-out L1: 0.2955
+PASS -- real clearly beats blind  (0.1745 < 0.8 * 0.2955 = 0.2364)
+```
+
+Re-run once more after fixing two batch-dimension bugs surfaced while
+adding the PFN-posterior plot panel (see the second commit on
+`ei-argmax-diagnostic`) — identical numbers both times (same seed, the fix
+was plotting-only), which is itself a useful consistency check that the
+fix didn't perturb training.
+
+`plot_ei_diagnostic`'s overlay (4 held-out contexts, PFN posterior
+mean±std on top, EI curve + true argmax (red) + `ActionHead`'s own
+`beta_mode` prediction (blue) on the bottom) shows a real but imperfect
+correspondence: context 1 is a close match, contexts 0/2/3 show the
+policy landing in the right general region but off the true argmax by a
+non-trivial margin — consistent with the aggregate 0.17 mean L1 on a
+`[0,1]` domain, not a coincidence of the aggregate number.
 
 ## What we learned
 
-Pending — see Result.
+**The architecture passes this isolated test at real scale.** The
+frozen-PFN cross-attention pathway clearly carries information the blind
+ablation cannot access (0.1745 vs. 0.2955 held-out L1 — not a marginal
+gap), and the memorize stage confirms the Beta head can fit a single known
+EI-argmax target from a cold start (5.50 → 0.23). This is real evidence
+that `ActionHead`'s single-shot, single-query-token readout *can* do
+argmax-finding on a well-defined, closed-form, unimodal-ish 1D acquisition
+surface — the narrower of the two questions this diagnostic set out to
+separate (see Motivation) — without needing the search-depth options
+(K-candidate tokens / recursive refinement / flow matching) from
+`docs/log/2026-09-02-actionhead-search-depth-design-options.md`, at least
+not at this scale/dimensionality.
+
+**What this does NOT establish, stated plainly so it doesn't get
+overclaimed later:** (1) a 0.17 mean L1 on `[0,1]` is a real gap, not
+convergence to the true argmax — the overlay plot shows genuine misses,
+not just noise around a tight fit; (2) x_dim=1 only, on one smoke-scale
+PFN checkpoint — the multimodal, higher-x_dim, or harder-EI-landscape case
+(e.g. context 0's sharp EI ridge) is untested; (3) this says nothing yet
+about the *other*, harder, entangled question (can `ActionHead` also learn
+what a good acquisition function is, not just maximize a given one) —
+that's still the full EXIT pipeline's open problem, unaffected by this
+result either way.
 
 ## Status / next steps
 
-Design complete, unit-tested, smoke-tested locally (pipeline runs
-end-to-end, no real-scale signal yet). Next: a real-scale run on
-`ulysses`, then return to this entry (or a cross-linked follow-up) with
-the actual numbers and verdict. If the architecture fails even this
-simpler, fully-specified target at real scale, that is meaningful evidence
-for pursuing the search-depth options (K-candidate tokens / recursive
-refinement / flow matching) before spending more effort on the harder,
-entangled full-EXIT privileged-search target.
+**Adopted as a working diagnostic; first real-scale result in hand.**
+Passes at x_dim=1 on the smoke checkpoint. Next candidates, not yet
+started: (a) run against `pfn_ulysses_real.pt` or another non-smoke
+checkpoint once one exists at x_dim=1, to check the result isn't an
+artifact of the smoke PFN's own (possibly under-calibrated) posterior;
+(b) push `n_grid`/`generalize_steps` further to see whether the 0.17 L1
+floor is an optimization/data-budget limit or closer to the architecture's
+ceiling; (c) if a higher-x_dim checkpoint becomes available, this
+diagnostic's grid-based oracle stops being cheap/exhaustive (per
+`pfn_ei_argmax`'s own docstring) — would need revisiting before extending
+past x_dim=1. Given the pass here, the search-depth options in the sibling
+log entry are not urgently motivated by this result alone; revisit them if
+(a)/(b) surface a real ceiling rather than a budget limit.
