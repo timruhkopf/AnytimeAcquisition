@@ -1,13 +1,18 @@
-# pfn/bar_dist/prior/action_head/branches/seed/build_interesting_points_kwargs/
-# model_config/on_log/extra_checkpoint_metadata/callbacks are runtime objects,
-# passed at instantiate() time in pipelines/action_head_imitation.py -- not
-# representable in YAML, same pattern as trainer/pfn_trainer.yaml.
+# pfn/bar_dist/prior/action_head/seed/model_config/on_log/
+# extra_checkpoint_metadata/callbacks are runtime objects, passed at
+# instantiate() time in pipelines/train_exit.py -- not representable in
+# YAML, same pattern as trainer/pfn_trainer.yaml.
 _target_: anytimeacquisition.trainer.action_head_imitation_trainer.ActionHeadImitationTrainer
 n_rollouts: 500
 n_init: 5
 n_steps: 20
 lr: 1.0e-3
 log_every: 10
+# Interpolated (not a runtime-only object) so instantiate(cfg.trainer, ...)
+# passes it automatically -- harmless when explore_search_kwargs is null
+# (the trainer never reads it in that case), so no per-experiment
+# conditional needed.
+build_interesting_points_kwargs: ${build_interesting_points_kwargs}
 # Deliberately fewer GD steps than exploit_search's own default (50, see
 # search/exploit.py) -- reduces how far the oracle can wander from what's
 # plausibly reachable given the tiny context, trading search thoroughness
@@ -17,6 +22,13 @@ log_every: 10
 # seed at (small perturbations of) the incumbent, not a global random point
 # (2026-09-01, see search/exploit.py) -- n_restarts is cheap to raise a bit
 # since every restart stays local.
+#
+# exploit_search_kwargs/explore_search_kwargs being set (a dict) vs. `null`
+# is what selects which branch(es) train (2026-09-02 -- no separate
+# `branches` value; see trainer/action_head_imitation_trainer.py's own
+# module docstring). Override to `null` in an experiment config to turn a
+# branch off, e.g. `trainer.explore_search_kwargs: null` for an
+# exploit-only run.
 exploit_search_kwargs:
   n_restarts: 4
   n_steps: 15

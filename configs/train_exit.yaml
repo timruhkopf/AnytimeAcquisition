@@ -1,0 +1,136 @@
+# Top-level Hydra config for pipelines/train_exit.py -- separate
+# composition from configs/config.yaml/configs/train_pfn.yaml: this
+# pipeline loads an already-trained, frozen PFN (configs/pfn_checkpoint/)
+# and trains only an ActionHead, against the real privileged-search
+# oracles (search/exploit.py, search/explore.py).
+#
+# Which branch(es) train is selected by trainer.exploit_search_kwargs/
+# trainer.explore_search_kwargs being a dict (on) or `null` (off) --
+# see configs/trainer/action_head_imitation_trainer.yaml and
+# trainer/action_head_imitation_trainer.py's own module docstring for why
+# there's no separate `branches` value (2026-09-02). Swap to a different
+# frozen checkpoint via `pfn_checkpoint=<name>` rather than overriding
+# checkpoint_path/priors.x_dim directly, e.g.:
+#   uv run python -m anytimeacquisition.pipelines.train_exit \
+#     experiment=action_head_imitation_integrated_smoke
+defaults:
+  - priors: bnn
+  - pfn_checkpoint: smoke_xdim1
+  - trainer: action_head_imitation_trainer
+  - callbacks: mlflow
+  - _self_
+  - optional experiment: null
+
+seed: 0
+allow_dirty: false
+
+hydra:
+  run:
+    dir: ${aa_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${aa_root:}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
+# Own MLflow experiment -- diagnostic EXIT runs against an already-frozen
+# checkpoint.
+callbacks:
+  mlflow:
+    experiment_name: anytimeacquisition-action-head-imitation
+
+priors:
+  x_dim: ${pfn_checkpoint.max_x_dim}
+  batch_size: 8
+
+# Consulted whenever trainer.explore_search_kwargs is not null -- see
+# search/interesting_points.py::build_interesting_points. Harmless to
+# leave populated when explore is off (trainer.py never reads it in that
+# case); no conditional needed here.
+build_interesting_points_kwargs:
+  n_sobol: 16
+  n_random: 16
+  n_basin_restarts: 8
+
+# ActionHead's own capacity -- independent of the frozen PFN's size
+# (pfn_d_model/pfn_n_layers/x_dim are read from the checkpoint at runtime,
+# not set here). Defaults match ActionHead's own constructor defaults.
+action_head:
+  d_model: 64
+  n_heads: 4
+  d_ff: 128
+  dropout: 0.0
+
+# callbacks/action_head_validation.py's four factory functions, instantiated
+# straight from config via `_target_` (2026-09-02, previously built
+# explicitly in pipelines/train_exit.py's main()) -- x_dim/n_init/n_steps
+# interpolate off pfn_checkpoint/trainer so they can't drift out of sync
+# with the actual run, matching configs/models/baselines/{ei,pi,es}.yaml's
+# own _target_ convention. every_n_steps=null would mean "use the
+# trainer's own log_every cadence" (see callbacks/handler.py) -- every
+# check below overrides it explicitly to 50 instead (2026-09-01:
+# explore_signal_rate used to rely on the null/log_every default, but its
+# uncapped build_explore_buffer call is exactly as expensive as the other
+# three held-out checks, so it needs the same coarser cadence, not the
+# trainer's fine-grained one). explore_signal_rate itself is dropped
+# entirely (not just gated to never fire) by pipelines/train_exit.py's
+# main() when trainer.explore_search_kwargs is null -- a compute-cost
+# skip, not expressible purely declaratively here.
+action_head_validation:
+
+  auc_eval:
+    _target_: anytimeacquisition.callbacks.action_head_validation.build_auc_eval_callback
+    x_dim: ${pfn_checkpoint.max_x_dim}
+    n_init: ${trainer.n_init}
+    n_steps: ${trainer.n_steps}
+    eval_batch_size: 8
+    eval_seed: 999
+    ei_kwargs:
+      num_restarts: 5
+      raw_samples: 64
+    # random/EI are computed ONCE (memoized) and re-emitted as fixed
+    # reference values every subsequent tick, each averaged over this many
+    # independent rollouts on the SAME held-out instance(s) first --
+    # n_ei_restarts lower than n_random_restarts since EI is far more
+    # expensive per restart (independent GP fit + acqf optimization) -- see
+    # callbacks/action_head_validation.py::build_auc_eval_callback.
+    n_random_restarts: 5
+    n_ei_restarts: 3
+    log_figure: true
+    every_n_steps: 50
+
+  held_out_l1:
+    _target_: anytimeacquisition.callbacks.action_head_validation.build_held_out_target_l1_callback
+    n_init: ${trainer.n_init}
+    n_steps: ${trainer.n_steps}
+    eval_batch_size: 8
+    eval_seed: 1000
+    # Explicitly decoupled from trainer.log_every (2026-09-01) -- this does
+    # a real held-out rollout + oracle search, same cost order as a
+    # training rollout, so it shouldn't fire at whatever fine cadence
+    # log_every uses for the cheap built-in metrics (policy_nll/train,
+    # grad_norm, ...). Matches auc_eval/blind_ablation's own cadence.
+    every_n_steps: 50
+
+  blind_ablation:
+    _target_: anytimeacquisition.callbacks.action_head_validation.build_blind_ablation_callback
+    n_init: ${trainer.n_init}
+    n_steps: ${trainer.n_steps}
+    eval_batch_size: 8
+    eval_seed: 1001
+    every_n_steps: 50
+
+  explore_signal_rate:
+    _target_: anytimeacquisition.callbacks.action_head_validation.build_explore_signal_rate_callback
+    n_init: ${trainer.n_init}
+    n_steps: ${trainer.n_steps}
+    build_interesting_points_kwargs: ${build_interesting_points_kwargs}
+    eval_batch_size: 8
+    eval_seed: 1002
+    # Explicitly decoupled from trainer.log_every (2026-09-01, compute-cost
+    # fix) -- like held_out_l1/blind_ablation, this does an uncapped
+    # build_explore_buffer (no max_explore_steps_per_rollout subsampling),
+    # so it shouldn't fire at log_every's fine cadence (10 on
+    # action_head_imitation_explore_real.yaml -- was firing 5x more often
+    # than the other three held-out checks for no extra value, since it's
+    # largely redundant with the free, already-logged
+    # explore/signal_rate_train). Matches the others' cadence instead.
+    every_n_steps: 50

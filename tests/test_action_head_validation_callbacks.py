@@ -16,6 +16,10 @@ from anytimeacquisition.trainer.action_head_imitation_trainer import ActionHeadI
 
 
 def _fixture_trainer(x_dim=1, branches=("exploit", "explore")):
+    # `branches` is just this helper's own convenience parameter -- the
+    # trainer itself derives which branches are on from
+    # exploit_search_kwargs/explore_search_kwargs being a dict vs. None
+    # (2026-09-02, no separate `branches` field).
     torch.manual_seed(0)
     pfn = PFN(max_x_dim=x_dim, d_model=16, n_heads=2, n_layers=1, d_ff=32, n_bins=16)
     pfn.eval()
@@ -24,10 +28,10 @@ def _fixture_trainer(x_dim=1, branches=("exploit", "explore")):
     prior = BNNPrior(batch_size=4, x_dim=x_dim, seed=1)
     build_ip_kwargs = {"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2} if "explore" in branches else None
     return ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=pfn.bar_dist, prior=prior, action_head=action_head, branches=list(branches),
+        pfn=pfn, bar_dist=pfn.bar_dist, prior=prior, action_head=action_head,
         n_init=3, n_steps=5,
-        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
-        explore_search_kwargs={"n_restarts": 2, "n_steps": 5},
+        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5} if "exploit" in branches else None,
+        explore_search_kwargs={"n_restarts": 2, "n_steps": 5} if "explore" in branches else None,
         build_interesting_points_kwargs=build_ip_kwargs,
     )
 

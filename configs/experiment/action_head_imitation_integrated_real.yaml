@@ -3,10 +3,11 @@
 # both branches at once, sized for pfn_variable_xdim_smoke.pt's x_dim=6 --
 # pair with pfn_checkpoint=variable_xdim_smoke on the CLI.
 #
-#   uv run python -m anytimeacquisition.pipelines.action_head_imitation \
+#   uv run python -m anytimeacquisition.pipelines.train_exit \
 #     experiment=action_head_imitation_integrated_real pfn_checkpoint=variable_xdim_smoke allow_dirty=true
-branches: [exploit, explore]
-
+# Both branches on -- the trainer group config's own exploit_search_kwargs/
+# explore_search_kwargs defaults are already both dicts, no override needed
+# here (2026-09-02, no separate `branches` value).
 priors:
   batch_size: 16
 
@@ -16,7 +17,7 @@ trainer:
   # docs/log/ discussion, 2026-09-01). log_every kept fine (10) for the
   # cheap built-in metrics (policy_nll/train, grad_norm, ...); the
   # expensive held-out checks (held_out_l1/auc_eval/blind_ablation) have
-  # their own, coarser, decoupled cadence (configs/action_head_imitation.yaml).
+  # their own, coarser, decoupled cadence (configs/train_exit.yaml).
   n_rollouts: 800
   n_init: 10
   n_steps: 40

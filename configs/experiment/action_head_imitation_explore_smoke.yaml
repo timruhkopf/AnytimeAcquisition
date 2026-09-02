@@ -5,15 +5,15 @@
 # rollout, no exploit branch. Small model/few rollouts, same spirit as
 # configs/experiment/pfn_smoke_*.
 #
-#   uv run python -m anytimeacquisition.pipelines.action_head_imitation \
+#   uv run python -m anytimeacquisition.pipelines.train_exit \
 #     experiment=action_head_imitation_explore_smoke allow_dirty=true
-branches: [explore]
-
 trainer:
   n_rollouts: 300
   n_init: 5
   n_steps: 15
   log_every: 10
+  # null = exploit branch off (2026-09-02, no separate `branches` value).
+  exploit_search_kwargs: null
   explore_search_kwargs:
     n_restarts: 1
     n_steps: 15

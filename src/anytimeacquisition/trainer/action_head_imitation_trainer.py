@@ -28,11 +28,13 @@ padding needed), trained on immediately via one optimizer step per
 rollout (loss summed across all of that rollout's examples, not one step
 per step-group), then discarded.
 
-`branches: list[str]` (subset of `["exploit", "explore"]`) selects which
-oracle(s) label this rollout's examples -- `["exploit"]`/`["explore"]` give
-the two marginal behavior-cloning trainers, `["exploit", "explore"]` gives
-the integrated one; all three are this same class with a different
-config, not three different pieces of code.
+Which oracle(s) label a rollout's examples is selected by whether
+`exploit_search_kwargs`/`explore_search_kwargs` are `None` (off) or a
+dict (on, 2026-09-02 -- no separate `branches` field) -- exploit-only,
+explore-only, and integrated are all this same class with a different
+config, not three different pieces of code. `self.branches` (derived, see
+`__init__`) is the internal/read-only list other code (including
+`callbacks/action_head_validation.py`) checks membership against.
 
 `train_value_head`: off by default. `ImitationExample.y_star`'s units are
 branch-dependent (true-y for exploit, weighted-NLL for explore --
@@ -79,13 +81,24 @@ class ActionHeadImitationTrainer:
         bar_dist: BarDistribution,
         prior: BNNPrior,
         action_head: ActionHead,
-        branches: list[str],
         seed: int = 0,
         n_rollouts: int = 500,
         n_init: int = 5,
         n_steps: int = 20,
         lr: float = 1e-3,
         log_every: int = 10,
+        # Branch selection lives entirely in these two kwargs now
+        # (2026-09-02 -- no separate `branches: list[str]` field): `None`
+        # means that branch is OFF; `{}` (or any dict) means it's ON, with
+        # those oracle-search kwargs (empty dict -> exploit_search's/
+        # explore_search's own function defaults). This double-duty is
+        # deliberate, not accidental overloading -- it removes a whole
+        # class of bug where `branches` and these kwargs could silently
+        # drift out of sync (e.g. `branches=["exploit"]` while
+        # `explore_search_kwargs` was still populated). The previous
+        # `exploit_search_kwargs or {}` fallback used to make `None` mean
+        # "use defaults" -- that meaning moved to passing `{}` explicitly;
+        # `None` now has a single, unambiguous meaning: branch off.
         exploit_search_kwargs: dict | None = None,
         explore_search_kwargs: dict | None = None,
         build_interesting_points_kwargs: dict | None = None,
@@ -156,17 +169,25 @@ class ActionHeadImitationTrainer:
         extra_checkpoint_metadata: dict | None = None,
         callbacks: list[Callback] | None = None,
     ):
-        assert branches and set(branches) <= {"exploit", "explore"}, \
-            f"branches must be a nonempty subset of ('exploit', 'explore'), got {branches}"
-        if "explore" in branches:
+        assert exploit_search_kwargs is not None or explore_search_kwargs is not None, \
+            "at least one of exploit_search_kwargs/explore_search_kwargs must be set (not None) -- " \
+            "a None value means that branch is off, and training needs at least one branch on"
+        if explore_search_kwargs is not None:
             assert build_interesting_points_kwargs is not None, \
-                "branches includes 'explore' -- build_interesting_points_kwargs is required to build x_int/y_int_true"
+                "explore_search_kwargs is set (explore branch on) -- build_interesting_points_kwargs " \
+                "is required to build x_int/y_int_true"
 
         self.pfn = pfn
         self.bar_dist = bar_dist
         self.prior = prior
         self.action_head = action_head
-        self.branches = list(branches)
+        # Derived, not stored separately -- see the exploit_search_kwargs/
+        # explore_search_kwargs docstring above for why branch selection
+        # lives there instead of its own field.
+        self.branches = [
+            name for name, kwargs in (("exploit", exploit_search_kwargs), ("explore", explore_search_kwargs))
+            if kwargs is not None
+        ]
         self.seed = seed
         self.n_rollouts = n_rollouts
         self.n_init = n_init
@@ -507,7 +528,7 @@ if __name__ == "__main__":
 
     trainer = ActionHeadImitationTrainer(
         pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
-        branches=["exploit", "explore"], n_rollouts=20, n_init=4, n_steps=8, log_every=5,
+        n_rollouts=20, n_init=4, n_steps=8, log_every=5,
         exploit_search_kwargs={"n_restarts": 4, "n_steps": 15},
         explore_search_kwargs={"n_restarts": 4, "n_steps": 10},
         build_interesting_points_kwargs={"n_sobol": 8, "n_random": 8, "n_basin_restarts": 4},

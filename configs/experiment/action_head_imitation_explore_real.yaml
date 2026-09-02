@@ -3,10 +3,8 @@
 # run, sized for pfn_variable_xdim_smoke.pt's x_dim=6 -- pair with
 # pfn_checkpoint=variable_xdim_smoke on the CLI.
 #
-#   uv run python -m anytimeacquisition.pipelines.action_head_imitation \
+#   uv run python -m anytimeacquisition.pipelines.train_exit \
 #     experiment=action_head_imitation_explore_real pfn_checkpoint=variable_xdim_smoke allow_dirty=true
-branches: [explore]
-
 priors:
   batch_size: 16
 
@@ -19,11 +17,13 @@ trainer:
   # multi-day. log_every kept fine (10) for the cheap built-in metrics
   # (policy_nll/train, grad_norm, ...); the expensive held-out checks
   # (held_out_l1/auc_eval/blind_ablation) have their own, coarser,
-  # decoupled cadence (configs/action_head_imitation.yaml).
+  # decoupled cadence (configs/train_exit.yaml).
   n_rollouts: 800
   n_init: 10
   n_steps: 40
   log_every: 10
+  # null = exploit branch off (2026-09-02, no separate `branches` value).
+  exploit_search_kwargs: null
   explore_search_kwargs:
     n_restarts: 1
     n_steps: 15

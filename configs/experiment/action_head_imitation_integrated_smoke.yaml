@@ -4,10 +4,8 @@
 # steps), same random-policy rollout, same underlying trainer as the
 # exploit-only/explore-only smoke configs with both branches enabled.
 #
-#   uv run python -m anytimeacquisition.pipelines.action_head_imitation \
+#   uv run python -m anytimeacquisition.pipelines.train_exit \
 #     experiment=action_head_imitation_integrated_smoke allow_dirty=true
-branches: [exploit, explore]
-
 trainer:
   n_rollouts: 300
   n_init: 5

@@ -18,16 +18,21 @@ def _build(x_dim=1, batch_size=4):
     return pfn, pfn.bar_dist, prior, action_head
 
 
-@pytest.mark.parametrize("branches", [["exploit"], ["explore"], ["exploit", "explore"]])
-def test_trainer_runs_end_to_end_for_each_branch_setting(branches):
+@pytest.mark.parametrize("exploit_on,explore_on", [(True, False), (False, True), (True, True)])
+def test_trainer_runs_end_to_end_for_each_branch_setting(exploit_on, explore_on):
+    # Branch selection is exploit_search_kwargs/explore_search_kwargs being
+    # a dict (on) vs. None (off, the default) -- no separate `branches`
+    # field (2026-09-02).
     pfn, bar_dist, prior, action_head = _build()
-    build_ip_kwargs = {"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2} if "explore" in branches else None
+    exploit_search_kwargs = {"n_restarts": 2, "n_steps": 5} if exploit_on else None
+    explore_search_kwargs = {"n_restarts": 2, "n_steps": 5} if explore_on else None
+    build_ip_kwargs = {"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2} if explore_on else None
 
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=branches,
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=6, n_init=3, n_steps=5, log_every=1,
-        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
-        explore_search_kwargs={"n_restarts": 2, "n_steps": 5},
+        exploit_search_kwargs=exploit_search_kwargs,
+        explore_search_kwargs=explore_search_kwargs,
         build_interesting_points_kwargs=build_ip_kwargs,
     )
     result = trainer.run()
@@ -36,11 +41,11 @@ def test_trainer_runs_end_to_end_for_each_branch_setting(branches):
     assert len(history["policy_nll/train"]) == 6
     total_exploit = sum(history["n_examples/exploit"])
     total_explore = sum(history["n_examples/explore"])
-    if "exploit" in branches:
+    if exploit_on:
         assert total_exploit > 0
     else:
         assert total_exploit == 0
-    if "explore" in branches:
+    if explore_on:
         assert total_explore > 0
     else:
         assert total_explore == 0
@@ -50,7 +55,7 @@ def test_loss_decreases_over_a_short_integrated_run():
     torch.manual_seed(0)
     pfn, bar_dist, prior, action_head = _build(batch_size=8)
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit"],
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=40, n_init=3, n_steps=6, log_every=1, lr=3e-3,
         exploit_search_kwargs={"n_restarts": 4, "n_steps": 10},
     )
@@ -69,7 +74,7 @@ def test_callback_metrics_show_up_in_history_and_on_log():
     pfn, bar_dist, prior, action_head = _build()
     logged = []
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit"],
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=3, n_init=3, n_steps=4, log_every=1,
         exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
         on_log=lambda step, metrics: logged.append((step, metrics)),
@@ -81,11 +86,13 @@ def test_callback_metrics_show_up_in_history_and_on_log():
     assert all("edge_case/flag" in metrics for _, metrics in logged)
 
 
-def test_branches_validation_rejects_unknown_branch():
+def test_at_least_one_branch_must_be_on():
+    # exploit_search_kwargs/explore_search_kwargs both None (the default)
+    # means both branches off -- rejected, there'd be nothing to train on.
     pfn, bar_dist, prior, action_head = _build()
     with pytest.raises(AssertionError):
         ActionHeadImitationTrainer(
-            pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["nonsense"],
+            pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         )
 
 
@@ -93,14 +100,15 @@ def test_explore_branch_requires_build_interesting_points_kwargs():
     pfn, bar_dist, prior, action_head = _build()
     with pytest.raises(AssertionError):
         ActionHeadImitationTrainer(
-            pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["explore"],
+            pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
+            explore_search_kwargs={"n_restarts": 2, "n_steps": 5},
         )
 
 
 def test_dagger_beta_decays_and_is_logged():
     pfn, bar_dist, prior, action_head = _build()
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit"],
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=6, n_init=3, n_steps=4, log_every=1,
         exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
         dagger_decay_rounds=4, dagger_beta_min=0.1,
@@ -119,7 +127,7 @@ def test_without_dagger_beta_is_always_one():
     # opt-out path, not the default.
     pfn, bar_dist, prior, action_head = _build()
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit"],
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=3, n_init=3, n_steps=4, log_every=1,
         exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
         dagger_decay_rounds=None,
@@ -133,7 +141,7 @@ def test_checkpoint_round_trip(tmp_path):
     checkpoint_path = tmp_path / "action_head_ckpt.pt"
     model_config = {"pfn_d_model": pfn_dims(pfn)[0], "pfn_n_layers": pfn_dims(pfn)[1], "x_dim": 1, "d_model": 16, "n_heads": 2, "d_ff": 32, "dropout": 0.0}
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit"],
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=2, n_init=3, n_steps=4, log_every=1,
         exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
         checkpoint_path=checkpoint_path, model_config=model_config,
@@ -147,7 +155,7 @@ def test_checkpoint_round_trip(tmp_path):
     reloaded = ActionHead(**model_config)
     reloaded.load_state_dict(ckpt["model_state"])
 
-    from anytimeacquisition.pipelines.action_head_imitation import load_action_head_checkpoint
+    from anytimeacquisition.pipelines.train_exit import load_action_head_checkpoint
 
     loaded_action_head, loaded_ckpt = load_action_head_checkpoint(checkpoint_path)
     assert loaded_ckpt["mlflow_run_id"] == "abc123"
@@ -158,7 +166,7 @@ def test_checkpoint_round_trip(tmp_path):
 def test_new_diagnostic_metrics_are_present_and_finite():
     pfn, bar_dist, prior, action_head = _build(batch_size=8)
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit", "explore"],
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=3, n_init=3, n_steps=6, log_every=1,
         exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
         explore_search_kwargs={"n_restarts": 1, "n_steps": 5},
@@ -176,7 +184,7 @@ def test_new_diagnostic_metrics_are_present_and_finite():
 def test_max_explore_steps_per_rollout_limits_distinct_explore_steps():
     pfn, bar_dist, prior, action_head = _build(batch_size=8)
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["explore"],
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=1, n_init=3, n_steps=10, log_every=1,
         explore_search_kwargs={"n_restarts": 1, "n_steps": 5},
         build_interesting_points_kwargs={"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2},
@@ -200,14 +208,13 @@ def test_fill_unselected_explore_steps_with_exploit_adds_filler_examples():
     build_ip_kwargs = {"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2}
 
     trainer_no_fill = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit", "explore"],
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         n_rollouts=1, n_init=3, n_steps=10, log_every=1,
         exploit_search_kwargs={"n_restarts": 2, "n_steps": 5}, explore_search_kwargs={"n_restarts": 1, "n_steps": 5},
         build_interesting_points_kwargs=build_ip_kwargs, max_explore_steps_per_rollout=2,
     )
     trainer_fill = ActionHeadImitationTrainer(
         pfn=pfn, bar_dist=bar_dist, prior=BNNPrior(batch_size=8, x_dim=1, seed=1), action_head=action_head,
-        branches=["exploit", "explore"],
         n_rollouts=1, n_init=3, n_steps=10, log_every=1,
         exploit_search_kwargs={"n_restarts": 2, "n_steps": 5}, explore_search_kwargs={"n_restarts": 1, "n_steps": 5},
         build_interesting_points_kwargs=build_ip_kwargs, max_explore_steps_per_rollout=2,

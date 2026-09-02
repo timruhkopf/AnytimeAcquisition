@@ -1,19 +1,29 @@
-"""ActionHead behavior-cloning pipeline (M5) -- trains the `ActionHead`
-against the privileged-search oracles (`search/exploit.py`,
-`search/explore.py`) via `trainer.action_head_imitation_trainer.ActionHeadImitationTrainer`,
+"""EXIT training pipeline (M5, renamed from `action_head_imitation.py`
+2026-09-02) -- trains the `ActionHead` against the privileged-search
+oracles (`search/exploit.py`, `search/explore.py`) via
+`trainer.action_head_imitation_trainer.ActionHeadImitationTrainer`,
 DAgger-mixed by default (round-0 pure `trainer.exit_rollout.random_policy`,
 phased into the ActionHead's own rollout behavior -- see that trainer's own
 module docstring for the schedule).
 
-One pipeline (not three): `branches` (a config value, `[exploit]`/
-`[explore]`/`[exploit, explore]`) selects the marginal-exploit,
-marginal-explore, or integrated run -- see
-`configs/experiment/action_head_imitation_{exploit,explore,integrated}_smoke.yaml`.
+One pipeline (not three): whether `cfg.trainer.exploit_search_kwargs`/
+`explore_search_kwargs` are set (a dict) or `null` selects the
+marginal-exploit, marginal-explore, or integrated run -- see
+`configs/experiment/action_head_imitation_{exploit,explore,integrated}_smoke.yaml`
+(no separate `branches` config value -- see
+`trainer/action_head_imitation_trainer.py`'s own module docstring for why).
 Same two-entry-point shape as `pipelines/train_pfn.py`:
 `train_action_head_imitation(...)` (plain function, scalar kwargs, no
 Hydra/MLflow) and `main(cfg)` (the Hydra entry point, `pfn_checkpoint`
-config group + provenance + MLflow, matching
-`pipelines/action_head_posterior_distill.py`'s own `main()`).
+config group + provenance + MLflow).
+
+`callbacks/action_head_validation.py`'s four factory functions are
+instantiated straight from `configs/train_exit.yaml`'s
+`action_head_validation:` block via `_target_` (2026-09-02, previously
+built explicitly here) -- each entry interpolates `x_dim`/`n_init`/
+`n_steps` off `pfn_checkpoint`/`trainer` rather than needing them passed
+programmatically, matching `configs/models/baselines/{ei,pi,es}.yaml`'s
+own `_target_` convention.
 """
 import logging
 import os
@@ -28,12 +38,6 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from anytimeacquisition.callbacks.action_head_validation import (
-    build_auc_eval_callback,
-    build_blind_ablation_callback,
-    build_explore_signal_rate_callback,
-    build_held_out_target_l1_callback,
-)
 from anytimeacquisition.deployment.provenance import record_provenance
 from anytimeacquisition.models.action_head import ActionHead, pfn_dims
 from anytimeacquisition.pipelines.train_pfn import load_pfn_checkpoint
@@ -49,7 +53,6 @@ DEFAULT_CHECKPOINT = CHECKPOINT_DIR / "pfn_smoke_xdim1.pt"
 
 def train_action_head_imitation(
     checkpoint_path,
-    branches: list[str],
     seed: int = 0,
     n_rollouts: int = 200,
     n_init: int = 5,
@@ -89,7 +92,7 @@ def train_action_head_imitation(
     )
 
     trainer = ActionHeadImitationTrainer(
-        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=branches,
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
         seed=seed, n_rollouts=n_rollouts, n_init=n_init, n_steps=n_steps, lr=lr, log_every=log_every,
         exploit_search_kwargs=exploit_search_kwargs, explore_search_kwargs=explore_search_kwargs,
         build_interesting_points_kwargs=build_interesting_points_kwargs, train_value_head=train_value_head,
@@ -112,11 +115,11 @@ def load_action_head_checkpoint(checkpoint_path: str | Path, device: str = "cpu"
     return action_head, ckpt
 
 
-@hydra.main(config_path="../../../configs", config_name="action_head_imitation", version_base=None)
+@hydra.main(config_path="../../../configs", config_name="train_exit", version_base=None)
 def main(cfg: DictConfig) -> dict:
     """Hydra entry point. Select a named, reproducible config via
     `experiment=<name>` (see configs/experiment/), e.g.:
-      uv run python -m anytimeacquisition.pipelines.action_head_imitation \\
+      uv run python -m anytimeacquisition.pipelines.train_exit \\
         experiment=action_head_imitation_integrated_smoke
     """
     overrides = HydraConfig.get().overrides.task
@@ -162,35 +165,25 @@ def main(cfg: DictConfig) -> dict:
         )
         action_head = ActionHead(**action_head_config)
 
-        branches = list(cfg.branches)
-        n_init, n_steps = cfg.trainer.n_init, cfg.trainer.n_steps
-        build_ip_kwargs = OmegaConf.to_container(cfg.build_interesting_points_kwargs, resolve=True) \
-            if "explore" in branches else None
-
-        callbacks = [
-            build_auc_eval_callback(
-                x_dim=x_dim, n_init=n_init, n_steps=n_steps,
-                **OmegaConf.to_container(cfg.action_head_validation.auc_eval, resolve=True),
-            ),
-            build_held_out_target_l1_callback(
-                n_init=n_init, n_steps=n_steps,
-                **OmegaConf.to_container(cfg.action_head_validation.held_out_l1, resolve=True),
-            ),
-            build_blind_ablation_callback(
-                n_init=n_init, n_steps=n_steps,
-                **OmegaConf.to_container(cfg.action_head_validation.blind_ablation, resolve=True),
-            ),
-        ]
-        if "explore" in branches:
-            callbacks.append(build_explore_signal_rate_callback(
-                n_init=n_init, n_steps=n_steps, build_interesting_points_kwargs=build_ip_kwargs,
-                **OmegaConf.to_container(cfg.action_head_validation.explore_signal_rate, resolve=True),
-            ))
+        # Each entry under action_head_validation: carries its own
+        # `_target_` (2026-09-02, previously built explicitly here --
+        # x_dim/n_init/n_steps/build_interesting_points_kwargs are all
+        # interpolated off pfn_checkpoint/trainer/the top-level config now,
+        # see configs/train_exit.yaml). instantiate() on the whole block
+        # eagerly calls each factory once, giving back {name: Callback}.
+        callbacks_by_name = instantiate(cfg.action_head_validation)
+        if cfg.trainer.explore_search_kwargs is None:
+            # explore_signal_rate's own probe() always runs an uncapped
+            # build_explore_buffer regardless of what the trainer trains
+            # on -- skip it entirely when explore is off, not a branch-
+            # taxonomy check, a compute-cost one (see that callback's own
+            # docstring and docs/log/2026-09-01-explore-branch-beta-nll-uniform-collapse.md).
+            callbacks_by_name.pop("explore_signal_rate", None)
+        callbacks = list(callbacks_by_name.values())
 
         trainer = instantiate(
             cfg.trainer, pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
-            branches=branches, seed=cfg.seed,
-            build_interesting_points_kwargs=build_ip_kwargs,
+            seed=cfg.seed,
             model_config=action_head_config,
             on_log=lambda step, metrics: mlflow.log_metrics(metrics, step=step),
             extra_checkpoint_metadata={
