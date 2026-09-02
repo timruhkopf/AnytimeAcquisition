@@ -49,8 +49,12 @@ def test_auc_eval_callback_returns_finite_metrics_for_all_three_policies():
         "auc_improvement_vs_random/mean_minus_std", "auc_improvement_vs_random/mean_plus_std",
     }
     assert _all_finite(metrics)
+    # rel=1e-5 (not pytest.approx's tighter default): these two values come
+    # from different float32 computation orders (tensor subtract-then-mean
+    # vs. python-level mean-then-subtract of already-.item()'d floats) --
+    # mathematically equivalent, not bit-identical at float32 precision.
     assert metrics["auc_improvement_vs_random/mean"] == pytest.approx(
-        metrics["auc/random"] - metrics["auc/action_head"]
+        metrics["auc/random"] - metrics["auc/action_head"], rel=1e-5
     )
 
 
@@ -107,8 +111,13 @@ def test_held_out_target_l1_callback_reports_only_enabled_branches():
 
 
 def test_blind_ablation_callback_reports_ratio_per_branch():
+    # eval_batch_size=16 (not the module default 4) -- build_explore_buffer's
+    # require_improvement gate (2026-09-01) can legitimately leave zero
+    # surviving explore examples on a small batch/seed combination, which
+    # would make blind_ratio/explore nan (division by a zero count) --
+    # a bigger batch makes at least one surviving example reliable here.
     trainer = _fixture_trainer(branches=("exploit", "explore"))
-    callback = build_blind_ablation_callback(n_init=3, n_steps=5, eval_batch_size=4, eval_seed=8)
+    callback = build_blind_ablation_callback(n_init=3, n_steps=5, eval_batch_size=16, eval_seed=8)
     metrics = callback.fn(0, trainer)
     assert set(metrics) == {"blind_ratio/exploit", "blind_ratio/explore"}
     assert _all_finite(metrics)

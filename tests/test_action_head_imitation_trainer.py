@@ -114,11 +114,15 @@ def test_dagger_beta_decays_and_is_logged():
 
 
 def test_without_dagger_beta_is_always_one():
+    # dagger_decay_rounds=None explicitly -- the default is "auto" (mixing
+    # on, phased in) since 2026-09-01; this test is specifically about the
+    # opt-out path, not the default.
     pfn, bar_dist, prior, action_head = _build()
     trainer = ActionHeadImitationTrainer(
         pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head, branches=["exploit"],
         n_rollouts=3, n_init=3, n_steps=4, log_every=1,
         exploit_search_kwargs={"n_restarts": 2, "n_steps": 5},
+        dagger_decay_rounds=None,
     )
     history = trainer.run()["history"]
     assert history["dagger/beta"] == [1.0, 1.0, 1.0]

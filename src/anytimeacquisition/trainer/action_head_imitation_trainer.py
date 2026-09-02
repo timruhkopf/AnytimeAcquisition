@@ -394,19 +394,39 @@ class ActionHeadImitationTrainer:
                 n_explore_examples += diag["n_explore_examples"]
 
             if by_step:
+                # Per-example mean, not raw sum (2026-09-02, see
+                # docs/log/2026-09-01-explore-branch-beta-nll-uniform-collapse.md
+                # "Fix #4"): a rollout's total example count swings widely
+                # (~20 to ~150+, branches + subsampling combined), so
+                # summing left the effective step size scale directly with
+                # however many examples a given rollout happened to
+                # produce -- confirmed to cause a catastrophic first-few-
+                # rollouts blowup at real integrated scale (grad_norm=4178
+                # at rollout 0, collapsing to ~0.15 and never recovering
+                # for the remaining ~2960 rollouts of an otherwise-healthy-
+                # looking run). Dividing by example count makes the
+                # gradient scale example-count-invariant.
+                total_loss = total_loss / max(len(examples), 1)
                 opt.zero_grad()
                 total_loss.backward()
-                grad_norm = torch.sqrt(sum(
-                    p.grad.detach().square().sum() for p in self.action_head.parameters() if p.grad is not None
-                ))
+                # Clipping as a second, independent safety net -- guards
+                # against any other source of a pathologically large step
+                # (e.g. a rollout whose examples happen to be unusually
+                # poorly predicted early in training), not just the
+                # now-fixed example-count scaling above.
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.action_head.parameters(), max_norm=10.0)
                 opt.step()
             else:
                 grad_norm = None
 
             if rollout_idx % self.log_every == 0 or rollout_idx == self.n_rollouts - 1:
                 n_examples = max(len(examples), 1)
+                # total_loss is already a per-example mean when by_step was
+                # non-empty (divided above, before backward()) -- don't
+                # divide by n_examples again here.
+                mean_loss = total_loss.item() if by_step else 0.0
                 metrics = {
-                    "policy_nll/train": total_loss.item() / n_examples,
+                    "policy_nll/train": mean_loss,
                     "n_examples/exploit": float(n_exploit),
                     "n_examples/explore": float(n_explore),
                     "dagger/beta": beta,  # P(random_policy) this rollout -- decays 1.0 -> dagger_beta_min
