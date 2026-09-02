@@ -1,0 +1,61 @@
+# Top-level Hydra config for pipelines/action_head_ei_diagnostic.py --
+# separate composition from configs/config.yaml/configs/train_pfn.yaml/
+# configs/train_exit.yaml, same reasoning as action_head_posterior_distill's
+# own former config (see git history / docs/log/2026-09-02-actionhead-
+# search-depth-design-options.md): this pipeline loads an already-trained,
+# frozen PFN (configs/pfn_checkpoint/) and trains only an ActionHead,
+# against a KNOWN, closed-form EI target read off that PFN's own posterior
+# -- not the privileged-search oracle. x_dim=1 only (see the pipeline
+# module's docstring for why).
+#
+# Swap to a different trained x_dim=1 checkpoint via `pfn_checkpoint=<name>`
+# rather than overriding checkpoint_path/priors.x_dim directly, e.g.:
+#   uv run python -m anytimeacquisition.pipelines.action_head_ei_diagnostic \
+#     allow_dirty=true
+defaults:
+  - priors: bnn
+  - pfn_checkpoint: smoke_xdim1
+  - callbacks: mlflow
+  - _self_
+  - optional experiment: null
+
+seed: 0
+allow_dirty: false
+
+hydra:
+  run:
+    dir: ${aa_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${aa_root:}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
+# Own MLflow experiment -- diagnostic runs against an already-frozen
+# checkpoint, distinct from action_head_posterior_distill's own experiment.
+callbacks:
+  mlflow:
+    experiment_name: anytimeacquisition-action-head-ei-diagnostic
+
+priors:
+  x_dim: ${pfn_checkpoint.max_x_dim}
+  batch_size: 16
+
+n_train_context: 10
+memorize_steps: 150
+generalize_steps: 400
+eval_contexts: 50
+# Dense-grid resolution for the EI-argmax oracle (models/baselines/
+# pfn_acquisition.py::pfn_ei_argmax) -- x_dim=1 so this is cheap; bump for
+# a tighter argmax if the memorize stage's loss floor looks resolution-
+# limited rather than optimization-limited.
+n_grid: 500
+lr: 3.0e-3
+log_every: 25
+
+# ActionHead's own capacity -- independent of the frozen PFN's size
+# (pfn_d_model/pfn_n_layers are read from the checkpoint at runtime, not
+# set here). Defaults match ActionHead's own constructor defaults.
+action_head:
+  d_model: 64
+  n_heads: 4
+  d_ff: 128
+  dropout: 0.0
