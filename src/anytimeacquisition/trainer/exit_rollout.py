@@ -59,7 +59,7 @@ from anytimeacquisition.models.bar_distribution import BarDistribution
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.priors.bnn import BNNPrior
 from anytimeacquisition.search.explore import explore_search, improvement_weights
-from anytimeacquisition.search.exploit import exploit_search
+from anytimeacquisition.search.exploit import exploit_search_trajectory
 from anytimeacquisition.search.interesting_points import build_interesting_points
 
 
@@ -213,53 +213,73 @@ def build_exploit_buffer(
     prior: BNNPrior, rollout: dict, n_init: int, exploit_search_kwargs: dict | None = None,
     steps: set[int] | None = None, require_exploit_label: bool = True,
 ) -> list[ImitationExample]:
-    """Runs `exploit_search` at every exploit-labeled (instance, step) pair
-    and collects the resulting oracle corrections into a flat buffer. Calls
-    `exploit_search` once per step across the *full* batch even when only
-    some instances are exploit-labeled at that step (`BNNPrior.evaluate`
-    requires its leading dim to exactly match the instance it was `reset()`
-    with, so a labeled subset can't be sliced out and searched on its own
-    without also slicing the prior's internal weight tensors — out of scope
-    for this skeleton) — simpler and correct, at the cost of some wasted
-    search on non-exploit instances.
+    """Collect one oracle-correction training example for every exploit-
+    labeled `(instance, step)` pair in a rollout.
 
-    `steps`: optional allowlist of step indices to consider at all (other
-    steps are skipped regardless of labeling) -- unset (default) considers
-    every step, unchanged from before.
+    Runs `search.exploit.exploit_search_trajectory` once for the *whole*
+    rollout (2026-09-02 -- previously a Python loop calling `exploit_search`
+    once per step; see `docs/log/2026-09-02-exploit-search-batched-across-trajectory.md`
+    for why this is equivalent, just one batched GD run instead of many
+    small sequential ones), then picks out only the labeled `(instance,
+    step)` pairs. Every instance gets searched for every step regardless of
+    labeling -- `exploit_search`'s own GD doesn't get any cheaper by only
+    running it at some steps, and it's independent of the frozen PFN, so
+    this is cheap either way.
 
-    `require_exploit_label`: `True` (default) matches every previous
-    caller -- only instances `label_branches` actually calls exploit-labeled
-    at a given step get a target. `False` flips the per-step mask to the
-    *complement* (`~is_exploit`, i.e. the flat instances) instead -- used to
-    generate "filler" exploit targets at steps the explore branch chose not
-    to spend its own budget on (`trainer.action_head_imitation_trainer`'s
-    `fill_unselected_explore_steps_with_exploit`, 2026-09-01), rather than
-    leaving those instances with no training example at all. Exploit's own
-    oracle (a local refinement of the current incumbent, given the current
-    context) is well-defined at ANY step, not just ones where the realized
-    trajectory happened to already show an improvement -- `label_branches`
-    is a labeling/routing choice for which oracle to consult by default,
-    not a claim that `exploit_search`'s result is only meaningful at
-    naturally-improving steps. A caller combining a `require_exploit_label=True`
-    call with a `require_exploit_label=False` call at *different, disjoint*
-    step sets never double-labels the same (instance, step) pair (each
-    instance is exploit-labeled XOR flat at a given step, never both).
+    Parameters
+    ----------
+    prior : BNNPrior
+        The live BNN instance `rollout` was generated from.
+    rollout : dict
+        As returned by `rollout_episode` -- needs `x_context`, `y_context`,
+        and `pre_step_contexts`.
+    n_init : int
+        Number of initial random samples before the policy's own steps
+        began (matches whatever `rollout_episode` was called with).
+    exploit_search_kwargs : dict, optional
+        Passed straight through to `exploit_search_trajectory` (restart
+        count, GD step count, learning rate, jitter magnitudes).
+    steps : set of int, optional
+        Only consider these step indices; steps outside this set are
+        skipped regardless of labeling. Default (`None`): every step.
+    require_exploit_label : bool
+        `True` (default): only instances actually labeled exploit at a
+        given step (`label_branches`) get a training example. `False`:
+        the opposite -- only the *flat* instances at a given step get one.
+        Used to backfill "filler" exploit targets at steps the explore
+        branch skipped (`ActionHeadImitationTrainer`'s
+        `fill_unselected_explore_steps_with_exploit`) -- exploit's own
+        oracle (refine the current incumbent) is meaningful at any step,
+        not just ones that happened to already show an improvement. Two
+        calls with `require_exploit_label=True`/`False` on disjoint `steps`
+        never label the same `(instance, step)` pair twice.
+
+    Returns
+    -------
+    list[ImitationExample]
+        One example per matching `(instance, step)` pair, each carrying
+        that step's own context (what the policy would actually condition
+        on) and the oracle's refined `x_star`/`y_star` for it.
     """
     exploit_search_kwargs = exploit_search_kwargs or {}
     is_exploit = label_branches(rollout["y_context"], n_init)  # [B, n_steps]
+    x_star, y_star = exploit_search_trajectory(
+        prior, rollout["x_context"], rollout["y_context"], n_init, **exploit_search_kwargs,
+    )  # [B, n_steps, x_dim], [B, n_steps]
 
     buffer: list[ImitationExample] = []
-    for step, (x_ctx, y_ctx) in enumerate(rollout["pre_step_contexts"]):
+    n_steps = is_exploit.shape[1]
+    for step in range(n_steps):
         if steps is not None and step not in steps:
             continue
         step_mask = is_exploit[:, step] if require_exploit_label else ~is_exploit[:, step]
         if not step_mask.any():
             continue
-        x_star, y_star = exploit_search(prior, x_ctx, y_ctx, **exploit_search_kwargs)
+        x_ctx, y_ctx = rollout["pre_step_contexts"][step]
         for b in torch.nonzero(step_mask, as_tuple=False).squeeze(-1).tolist():
             buffer.append(ImitationExample(
                 x_context=x_ctx[b].clone(), y_context=y_ctx[b].clone(),
-                x_star=x_star[b].detach().clone(), y_star=y_star[b].detach().clone(),
+                x_star=x_star[b, step].detach().clone(), y_star=y_star[b, step].detach().clone(),
                 branch="exploit", instance_idx=b, step=step,
             ))
     return buffer
