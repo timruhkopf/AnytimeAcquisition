@@ -136,7 +136,7 @@ what a good acquisition function is, not just maximize a given one) —
 that's still the full EXIT pipeline's open problem, unaffected by this
 result either way.
 
-## Status / next steps
+## Status / next steps (as of the smoke-checkpoint result above)
 
 **Adopted as a working diagnostic; first real-scale result in hand.**
 Passes at x_dim=1 on the smoke checkpoint. Next candidates, not yet
@@ -151,3 +151,66 @@ diagnostic's grid-based oracle stops being cheap/exhaustive (per
 past x_dim=1. Given the pass here, the search-depth options in the sibling
 log entry are not urgently motivated by this result alone; revisit them if
 (a)/(b) surface a real ceiling rather than a budget limit.
+
+## Addendum (same day): confirmed on a real (non-smoke) checkpoint, with per-iteration snapshots
+
+Addresses next-step (a) above. `pfn_ulysses_real.pt` turned out to be
+x_dim=2 (not 1) and its saved config used a stale key (`x_dim` instead of
+`PFN.__init__`'s actual `max_x_dim`), crashing `load_pfn_checkpoint` --
+fixed (normalizes the key in place). Rather than generalize this
+diagnostic to 2D (a real scope increase -- 2D grid, 2D acquisition
+heatmap), used `pfn_variable_xdim_smoke.pt` instead (trained with variable
+x_dim up to 6) at 1 real active dimension: `main()` now reads the
+diagnostic's real/active `x_dim` from `priors.x_dim`, decoupled from the
+checkpoint's own `max_x_dim` capacity, and relies on `PFN.forward`'s
+existing `n_features=x.shape[-1]` fallback to treat the extra dims as
+correctly zero-padded/rescaled. New experiment config:
+`configs/experiment/action_head_ei_diagnostic_variable_xdim.yaml` (pair
+with `pfn_checkpoint=variable_xdim_smoke` on the CLI).
+
+Also added, per explicit request: a richer per-context panel (heatmap of
+the PFN's predictive density over the grid -- "the logits of the pfn" --
+overlaid with the *true* underlying BNN function, the posterior mean, and
+the samples, replacing the earlier mean±std-band version) and a periodic
+**training-snapshot** mechanism (`run_stage`'s `snapshot_every`/
+`snapshot_fn`): every N steps during the generalize-real stage, render and
+log this panel for one FIXED held-out context, so the sequence visualizes
+convergence rather than just the end state.
+
+**Result**, same hyperparameters as before (`memorize_steps=300
+generalize_steps=2000 eval_contexts=100 n_grid=1000`, `snapshot_every=100`,
+21 logged snapshots):
+
+```
+memorize final loss:            2.4306 -> -0.4704
+generalize (real)  held-out L1: 0.1919
+generalize (blind) held-out L1: 0.2504
+PASS -- real clearly beats blind  (0.1919 < 0.8 * 0.2504 = 0.2003)
+```
+
+**Confirms the smoke-checkpoint result was not an artifact of that
+checkpoint's own calibration** — the pass replicates on a genuinely
+trained, non-smoke PFN, closing next-step (a). The snapshot sequence
+(`step_00000.png` → `step_01999.png`) shows the ActionHead's predicted
+argmax on the fixed held-out context moving from ~0.5 (near-uninformed
+start) to ~0.11 (close to, but not exactly, the true argmax at the grid's
+left boundary) — with most of the movement complete by ~step 1000, then a
+long plateau — a genuinely visible, non-trivial convergence trajectory,
+not just a before/after number.
+
+One operational note, not a research finding: the `ulysses` SSH connection
+dropped mid-run (`Connection timed out during banner exchange`) while
+this job was running detached under `nohup` — the training job itself was
+unaffected (survived and completed normally; `nohup` + redirected
+stdin/stdout/stderr is what makes a background remote job resilient to
+this), only the monitoring/status-check commands failed and were retried
+once connectivity returned.
+
+### Status / next steps (updated)
+
+Next-step (a) from above: **done**, real checkpoint confirmed. Remaining
+open items: (b) budget-vs-ceiling check (is ~0.19 L1 a data/step budget
+limit or closer to the architecture's ceiling), and (c) 2D+ generalization
+(deferred; `pfn_ulysses_real.pt` at x_dim=2 remains untested by this
+diagnostic, would need `pfn_ei_argmax` and the plotting generalized to a
+2D grid/heatmap-over-(x1,x2), a real scope increase, not started).
