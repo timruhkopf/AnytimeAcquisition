@@ -118,7 +118,11 @@ def explore_search(
     n_steps: int = 30,
     lr: float = 0.05,
     init_noise_std: float = 0.02,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    record_trajectory: bool = False,
+) -> (
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+):
     """Multistart GD on the frozen PFN's weighted NLL at `x_int` (see module
     docstring). `prior` must be the *same live instance* `x_context`/
     `y_context`/`x_int`/`y_int_true` came from — its `evaluate(..., noise=False)`
@@ -181,6 +185,15 @@ def explore_search(
     what this search actually achieved, should use
     `pipelines/explore_search_playground.py`'s diagnostics rather than
     reading this number in isolation.
+
+    With `record_trajectory=True`, also returns `trajectory`:
+    [n_steps+1, B, n_restarts, x_dim], `candidates`' position after every GD
+    step (index 0 = the seeded starting points, before any step) -- same
+    convention as `search.exploit.exploit_search`'s own `record_trajectory`.
+    This is the raw optimization path, NOT `best_x`'s history (Adam's steps
+    aren't monotonic, same caveat as the best-so-far tracking above) -- for
+    inspecting/plotting the search's behavior, not used by the search
+    itself.
     """
     B, _, x_dim = x_context.shape
 
@@ -213,6 +226,7 @@ def explore_search(
         jitter = torch.zeros(B, n_restarts, x_dim)
     candidates = (base + jitter).clamp(0.0, 1.0).detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([candidates], lr=lr)
+    trajectory = [candidates.detach().clone()] if record_trajectory else None
 
     # Best-so-far tracking, not just the final iterate: Adam's steps aren't
     # monotonically decreasing (momentum can overshoot, same issue
@@ -248,6 +262,8 @@ def explore_search(
         opt.step()
         with torch.no_grad():
             candidates.clamp_(0.0, 1.0)
+        if record_trajectory:
+            trajectory.append(candidates.detach().clone())
 
     with torch.no_grad():
         y_explore_true = prior.evaluate(candidates, noise=False)
@@ -264,7 +280,161 @@ def explore_search(
     best_idx = best_val.argmin(dim=1)
     x_star = best_x[torch.arange(B), best_idx]
     val_star = best_val[torch.arange(B), best_idx]
+    if record_trajectory:
+        return x_star, val_star, has_signal, torch.stack(trajectory, dim=0)  # [n_steps+1, B, n_restarts, x_dim]
     return x_star, val_star, has_signal
+
+
+def _true_y_for_instance(prior: BNNPrior, x_local: torch.Tensor, instance_idx: int) -> torch.Tensor:
+    """x_local: [N, x_dim] arbitrary points -> their true (noise-free) y
+    under a SINGLE instance, [N]. Broadcasts `x_local` to every row of
+    `prior`'s batch (`evaluate` requires its leading dim to exactly match
+    `prior.B`, one instance's own weights per row) and keeps only
+    `instance_idx`'s -- wasteful (computes B-1 unused rows) but simple, same
+    trade-off `pipelines/explore_search_playground.py` makes; diagnostic
+    plotting only, never on a hot path."""
+    x_full = x_local.unsqueeze(0).expand(prior.B, -1, -1)
+    with torch.no_grad():
+        return prior.evaluate(x_full, noise=False)[instance_idx]
+
+
+def _weight_marker_sizes(weights: torch.Tensor, instance_idx: int) -> tuple:
+    """Per-point marker size for the `x_int` scatter, scaled by
+    `improvement_weights` within one instance -- shared by
+    `plot_explore_search_1d`/`_2d` so a zero-weight point (no longer worth
+    resolving) reads as visually small/dim, not just a duller color."""
+    w = weights[instance_idx]
+    sizes = (20.0 + 220.0 * (w / w.max().clamp_min(1e-8))).numpy()
+    return w, sizes
+
+
+def plot_explore_search_1d(
+    prior: BNNPrior, x_context: torch.Tensor, y_context: torch.Tensor,
+    x_int: torch.Tensor, y_int_true: torch.Tensor, weights: torch.Tensor,
+    x_seed: torch.Tensor, x_star: torch.Tensor, trajectory: torch.Tensor | None = None,
+    instance_idx: int = 0, grid_res: int = 400, ax=None,
+):
+    """1D-only diagnostic: instance `instance_idx`'s true surface (dense
+    grid, noise-free) as a curve, with the fixed `x_int` interesting-point
+    set overlaid (color+size = `improvement_weights`, so which points are
+    actually driving the objective is visible directly), the training
+    context, and `x_explore`'s search path from `explore_search(...,
+    record_trajectory=True)` -- ○ = `x_seed` (where every restart started,
+    the incumbent), ★ = `x_star` (the search's returned point). All of
+    `x_context`/`x_int`/`weights`/`x_seed`/`x_star`/`trajectory` must be for
+    the SAME batch that `prior` was constructed with; only `instance_idx`'s
+    row is plotted. Returns the Axes; pass `ax` to place this in a subplot
+    grid, otherwise a new Figure/Axes is created."""
+    import matplotlib.pyplot as plt
+
+    assert prior.d == 1, "plot_explore_search_1d is 1D-only"
+    if ax is None:
+        _, ax = plt.subplots(figsize=(7, 5))
+    ink = "#1a1a1a"
+
+    lin = torch.linspace(0.0, 1.0, grid_res)
+    grid = lin.view(1, -1, 1).expand(prior.B, -1, -1)
+    with torch.no_grad():
+        grid_y = prior.evaluate(grid, noise=False)[instance_idx]
+    ax.plot(lin.numpy(), grid_y.numpy(), color=ink, linewidth=1.5, zorder=2, label="true f(x)")
+
+    ctx_x = x_context[instance_idx, :, 0].numpy()
+    ctx_y = y_context[instance_idx].numpy()
+    ax.scatter(ctx_x, ctx_y, marker="s", s=40, facecolor="none", edgecolor=ink, linewidth=1.4,
+               zorder=5, label="context")
+
+    w, sizes = _weight_marker_sizes(weights, instance_idx)
+    xi = x_int[instance_idx, :, 0]
+    yi = y_int_true[instance_idx]
+    sc = ax.scatter(xi.numpy(), yi.numpy(), c=w.numpy(), cmap="magma", s=sizes, edgecolor=ink, linewidth=0.4,
+                     zorder=4, label="interesting pts (size/color ∝ weight)")
+    ax.figure.colorbar(sc, ax=ax, pad=0.02).set_label("improvement weight", color=ink)
+
+    if trajectory is not None:
+        traj_x = trajectory[:, instance_idx, :, 0]  # [n_steps+1, n_restarts]
+        n_steps_p1, n_restarts = traj_x.shape
+        traj_y = _true_y_for_instance(prior, traj_x.reshape(-1, 1), instance_idx).reshape(n_steps_p1, n_restarts)
+        cmap = plt.get_cmap("tab10" if n_restarts <= 10 else "tab20")
+        for r in range(n_restarts):
+            color = cmap(r % cmap.N)
+            ax.plot(traj_x[:, r].numpy(), traj_y[:, r].numpy(), "-", color=color, linewidth=1.3, alpha=0.85,
+                     zorder=6)
+
+    seed_y = _true_y_for_instance(prior, x_seed[instance_idx].unsqueeze(0), instance_idx)
+    star_y = _true_y_for_instance(prior, x_star[instance_idx].unsqueeze(0), instance_idx)
+    ax.scatter([x_seed[instance_idx, 0].item()], [seed_y.item()], marker="o", s=80, facecolor="white",
+               edgecolor="tab:blue", linewidth=1.6, zorder=7, label="x_seed (start)")
+    ax.scatter([x_star[instance_idx, 0].item()], [star_y.item()], marker="*", s=180, color="red",
+               edgecolor="white", linewidth=0.9, zorder=8, label="x_star (end)")
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xlabel("x", color=ink)
+    ax.set_ylabel("y", color=ink)
+    ax.set_title(f"instance {instance_idx}: explore search (1D)", fontsize=10, color=ink)
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.85)
+    return ax
+
+
+def plot_explore_search_2d(
+    prior: BNNPrior, x_context: torch.Tensor, y_context: torch.Tensor,
+    x_int: torch.Tensor, y_int_true: torch.Tensor, weights: torch.Tensor,
+    x_seed: torch.Tensor, x_star: torch.Tensor, trajectory: torch.Tensor | None = None,
+    instance_idx: int = 0, grid_res: int = 100, ax=None,
+):
+    """2D analogue of `plot_explore_search_1d` (see its docstring) -- true
+    surface as a filled contour instead of a curve, interesting points/
+    context/seed/star/trajectory overlaid the same way, `search.exploit
+    .plot_restart_trajectories`'s general layout adapted for the explore
+    branch's fixed x_int/weight machinery instead of restart-only search."""
+    import matplotlib.pyplot as plt
+
+    assert prior.d == 2, "plot_explore_search_2d is 2D-only"
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.5, 5.5))
+    ink = "#1a1a1a"
+
+    lin = torch.linspace(0.0, 1.0, grid_res)
+    grid = torch.stack(torch.meshgrid(lin, lin, indexing="ij"), dim=-1).reshape(1, -1, 2).expand(prior.B, -1, -1)
+    with torch.no_grad():
+        grid_y = prior.evaluate(grid, noise=False)[instance_idx].reshape(grid_res, grid_res)
+    im = ax.contourf(lin.numpy(), lin.numpy(), grid_y.numpy().T, levels=30, cmap="viridis")
+    ax.contour(lin.numpy(), lin.numpy(), grid_y.numpy().T, levels=10, colors="white", linewidths=0.3, alpha=0.4)
+    ax.figure.colorbar(im, ax=ax, pad=0.02).set_label("true y (lower is better)", color=ink)
+
+    ctx = x_context[instance_idx].numpy()
+    ax.scatter(ctx[:, 0], ctx[:, 1], marker="s", s=40, facecolor="none", edgecolor=ink, linewidth=1.4,
+               zorder=5, label="context")
+
+    w, sizes = _weight_marker_sizes(weights, instance_idx)
+    xi = x_int[instance_idx]
+    sc = ax.scatter(xi[:, 0].numpy(), xi[:, 1].numpy(), c=w.numpy(), cmap="magma", s=sizes, edgecolor=ink,
+                     linewidth=0.4, zorder=4, label="interesting pts (size/color ∝ weight)")
+    ax.figure.colorbar(sc, ax=ax, pad=0.09).set_label("improvement weight", color=ink)
+
+    if trajectory is not None:
+        traj = trajectory[:, instance_idx]  # [n_steps+1, n_restarts, 2]
+        n_restarts = traj.shape[1]
+        cmap = plt.get_cmap("tab10" if n_restarts <= 10 else "tab20")
+        for r in range(n_restarts):
+            path = traj[:, r].numpy()
+            color = cmap(r % cmap.N)
+            ax.plot(path[:, 0], path[:, 1], "-", color=color, linewidth=1.3, alpha=0.9, zorder=6)
+
+    seed = x_seed[instance_idx].numpy()
+    star = x_star[instance_idx].numpy()
+    ax.scatter(seed[0], seed[1], marker="o", s=90, facecolor="white", edgecolor="tab:blue", linewidth=1.6,
+               zorder=7, label="x_seed (start)")
+    ax.scatter(star[0], star[1], marker="*", s=200, color="red", edgecolor="white", linewidth=0.9,
+               zorder=8, label="x_star (end)")
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("x1", color=ink)
+    ax.set_ylabel("x2", color=ink)
+    ax.set_title(f"instance {instance_idx}: explore search (2D)", fontsize=10, color=ink)
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.85)
+    return ax
 
 
 if __name__ == "__main__":

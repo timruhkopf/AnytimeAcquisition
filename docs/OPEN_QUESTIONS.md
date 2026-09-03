@@ -111,3 +111,21 @@ picked silently. Resolve and delete/move to a changelog as they're settled.
    the archive move since they weren't mentioned — gitignore them, add them,
    or something else?
 
+10. **M5.5 value-function discounting: `γ` vs. remaining-budget
+    conditioning.** Phase 5.5's planned advantage estimate (`A_t = G_t −
+    V_φ(s_t)`) hasn't decided how `V_φ` should encode temporal preference.
+    A stationary `γ` discount is the standard RL default, but it's built
+    for infinite- or unknown-horizon problems; this project's horizon is
+    finite and the remaining budget is already a known, causally-visible
+    quantity (`remaining_budget`, a canonical `ActionHead` aux feature in
+    `canonical_aux_features`). Finite-horizon MDP theory's actual answer is
+    a value function indexed/conditioned on remaining horizon, not a
+    stationary discounted approximation. Proposed direction, not yet
+    implemented or decided: condition `V_φ` on `remaining_budget` directly
+    instead of relying on `γ` to encode urgency, keeping `γ`/`λ` only if
+    still needed as a return-estimation variance-reduction device (a
+    separate role — see the log entry). Full reasoning in
+    `docs/log/2026-09-03-explore-search-objective-family-and-shaping-alignment.md`'s
+    follow-up section; broader M5.5 credit-assignment design space this
+    refines in `docs/log/2026-09-01-explore-fallback-and-credit-assignment-open-questions.md`.
+

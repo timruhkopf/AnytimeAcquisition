@@ -130,3 +130,24 @@ def test_explore_search_reduces_weighted_nll_at_interesting_points():
             continue
         assert weighted_after[b] <= weighted_before[b] + 1e-4
     assert torch.allclose(val_star, weighted_after, atol=1e-4)
+
+
+def test_explore_search_record_trajectory_shape_and_seed_consistency():
+    torch.manual_seed(0)
+    x_dim = 2
+    pfn, bar_dist = _tiny_pfn(x_dim=x_dim)
+    B, Nt, N_int = 3, 5, 6
+    prior = _tiny_prior(batch_size=B, x_dim=x_dim)
+    x_context, y_context, _, _ = prior.sample_episode(n_train=Nt, n_test=0)
+    x_int = torch.rand(B, N_int, x_dim)
+    with torch.no_grad():
+        y_int_true = prior.evaluate(x_int, noise=False)
+    x_seed = x_context[torch.arange(B), y_context.argmin(dim=1)]
+    n_restarts, n_steps = 3, 5
+
+    x_star, val_star, has_signal, trajectory = explore_search(
+        prior, pfn, bar_dist, x_context, y_context, x_int, y_int_true, x_seed,
+        n_restarts=n_restarts, n_steps=n_steps, record_trajectory=True,
+    )
+    assert trajectory.shape == (n_steps + 1, B, n_restarts, x_dim)
+    assert torch.equal(trajectory[0, :, 0], x_seed), "restart 0 must start exactly at x_seed"

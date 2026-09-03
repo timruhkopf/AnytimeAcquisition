@@ -29,6 +29,7 @@ first.
 ## Index
 
 <!-- newest first — add new entries above this line -->
+- [2026-09-03 — Explore-branch weighted-NLL objective: acquisition-function family, and whether it's safe as a dense shaping signal for the sparse exploit target](2026-09-03-explore-search-objective-family-and-shaping-alignment.md)
 - [2026-09-02 — Exploit search: one batched GD run across a whole trajectory, not one call per step](2026-09-02-exploit-search-batched-across-trajectory.md)
 - [2026-09-02 — EI-argmax isolation diagnostic: can ActionHead find the argmax of a known acquisition function, decoupled from learning one](2026-09-02-ei-argmax-isolation-diagnostic.md)
 - [2026-09-02 — ActionHead search-depth options: single-shot readout vs. amortized argmax-finding](2026-09-02-actionhead-search-depth-design-options.md)
