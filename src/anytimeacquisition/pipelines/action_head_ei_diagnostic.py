@@ -246,7 +246,13 @@ def plot_ei_diagnostic(
             axes[0, i].legend(fontsize=7, loc="upper right")
             axes[1, i].set_ylabel("EI")
             axes[1, i].legend(fontsize=7)
-    fig.colorbar(im, ax=axes[0, :], location="right", shrink=0.8, label="density")
+    # ax=axes (both rows), not just axes[0, :] (2026-09-03 fix): matplotlib
+    # shrinks whichever axes it's given to make room for the colorbar --
+    # passing only the top row left the bottom row (EI curves) full-width
+    # while the top row (density heatmap) got squeezed, breaking the
+    # column alignment `sharex=True` is supposed to guarantee. Passing the
+    # whole 2xN array shrinks both rows together, keeping columns aligned.
+    fig.colorbar(im, ax=axes, location="right", shrink=0.8, label="density")
     return fig
 
 
