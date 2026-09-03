@@ -57,7 +57,7 @@ from anytimeacquisition.models.bar_distribution import BarDistribution
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.pipelines.train_pfn import load_pfn_checkpoint
 from anytimeacquisition.priors.bnn import BNNPrior
-from anytimeacquisition.search.explore import improvement_weights
+from anytimeacquisition.search.explore import greedy_regret, improvement_weights  # noqa: F401 (re-exported below)
 from anytimeacquisition.trainer.exit_rollout import build_explore_buffer, random_policy, rollout_episode
 from anytimeacquisition.utils.flatten import flatten
 from anytimeacquisition.utils.paths import CHECKPOINT_DIR
@@ -66,23 +66,11 @@ log = logging.getLogger(__name__)
 
 DEFAULT_CHECKPOINT = CHECKPOINT_DIR / "pfn_smoke_xdim1.pt"
 
-
-@torch.no_grad()
-def greedy_regret(
-    pfn: PFN, bar_dist: BarDistribution, x_context: torch.Tensor, y_context: torch.Tensor,
-    x_int: torch.Tensor, y_int_true: torch.Tensor,
-) -> torch.Tensor:
-    """True regret of the model's own greedy pick among `x_int` (argmin of
-    predicted mean), given `x_context`/`y_context`. Non-differentiable,
-    diagnostic only -- see module docstring for why that's fine here.
-    x_context/y_context: [B,Nt,x_dim]/[B,Nt]  x_int/y_int_true: [B,N_int,x_dim]/[B,N_int]
-    -> [B]."""
-    predicted_means = bar_dist.mean(pfn(x_context, y_context, x_int))  # [B, N_int]
-    greedy_idx = predicted_means.argmin(dim=1)  # [B]
-    B = x_context.shape[0]
-    picked_y = y_int_true[torch.arange(B), greedy_idx]
-    best_y = y_int_true.min(dim=1).values
-    return picked_y - best_y
+# `greedy_regret` used to be defined here; it now lives in `search/explore.py`
+# so `trainer/exit_rollout.py` can use it as an actual label-quality gate
+# (`build_explore_buffer`'s `require_regret_improvement`), not just this
+# pipeline's own post-hoc diagnostic -- re-exported via the import above so
+# existing callers of `explore_search_playground.greedy_regret` don't break.
 
 
 def _pearson_corr(a: list[float], b: list[float]) -> float:

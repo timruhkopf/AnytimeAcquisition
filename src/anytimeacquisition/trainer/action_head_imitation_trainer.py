@@ -163,6 +163,35 @@ class ActionHeadImitationTrainer:
         # False by default, opt-in for ablation against the plain
         # subsampling-only behavior.
         fill_unselected_explore_steps_with_exploit: bool = False,
+        # Regret-based label filtering (see search/explore.py::greedy_regret,
+        # trainer/exit_rollout.py::build_explore_buffer's own docstring) --
+        # off by default (matches build_explore_buffer's own default), so
+        # turning it on is an explicit, measured choice. Costs two extra PFN
+        # forward passes per explore-labeled (instance, step) CONSIDERED
+        # (not just kept), on top of require_improvement's existing one.
+        require_regret_improvement: bool = False,
+        # k-step privileged planning for the explore branch (search/kstep_explore.py)
+        # -- 1 (default) is the existing 1-step explore_search, unchanged.
+        # >1 jointly plans that many points and keeps only the first as the
+        # label (see that module's docstring for why its own val_star is
+        # already safe to use as-is here, same contract as explore_search's).
+        explore_k: int = 1,
+        # Round-dependent seeding (docs/MILESTONES.md's prioritized
+        # experiment 3): off by default (matches build_explore_buffer's own
+        # "incumbent" default throughout). When True, switches
+        # build_explore_buffer's x_seed_mode from "incumbent" to "realized"
+        # once a rollout's realized DAgger mix is self-play-dominant enough
+        # (dagger/frac_self_generated >= realized_seed_min_self_generated) --
+        # a coarse, per-ROLLOUT decision, not per-instance (mixed_policy_fn
+        # mixes per-instance within a rollout; this doesn't try to track
+        # that finer grain, see build_explore_buffer's own docstring for why
+        # "realized" is unsafe under a still-mostly-random policy). Has no
+        # effect if dagger_decay_rounds=None (pure round-0-only random
+        # rollouts throughout -- x_realized would always be exactly the
+        # unsafe case this guards against, so "incumbent" is used
+        # unconditionally regardless of this flag).
+        round_dependent_seeding: bool = False,
+        realized_seed_min_self_generated: float = 0.7,
         checkpoint_path: str | Path | None = None,
         model_config: dict | None = None,
         on_log: Callable[[int, dict], None] | None = None,
@@ -202,18 +231,29 @@ class ActionHeadImitationTrainer:
         self.dagger_beta_min = dagger_beta_min
         self.max_explore_steps_per_rollout = max_explore_steps_per_rollout
         self.fill_unselected_explore_steps_with_exploit = fill_unselected_explore_steps_with_exploit
+        self.require_regret_improvement = require_regret_improvement
+        self.explore_k = explore_k
+        self.round_dependent_seeding = round_dependent_seeding
+        self.realized_seed_min_self_generated = realized_seed_min_self_generated
         self.checkpoint_path = checkpoint_path
         self.model_config = model_config
         self.on_log = on_log
         self.extra_checkpoint_metadata = extra_checkpoint_metadata
         self.callback_handler = CallbackHandler(callbacks)
 
-    def _collect_examples(self, rollout: dict) -> tuple[list[ImitationExample], dict]:
+    def _collect_examples(self, rollout: dict, frac_self_generated: float | None = None) -> tuple[list[ImitationExample], dict]:
         """-> (examples, extra_metrics). `extra_metrics` carries this
         rollout's subsampling/filler bookkeeping (`explore/signal_rate_train`,
         `n_examples/exploit_filler`) -- computed here since this is the one
         place that already has the per-step eligible/selected/unselected
-        step sets in hand."""
+        step sets in hand.
+
+        `frac_self_generated`: this rollout's EMPIRICALLY realized share of
+        actions that came from the ActionHead's own policy rather than
+        `random_policy` (`run()`'s own `usage_counter`-derived
+        `dagger/frac_self_generated`, `None` when DAgger mixing is off) --
+        used only to decide `x_seed_mode` below when `round_dependent_seeding`
+        is on."""
         examples: list[ImitationExample] = []
         extra: dict = {}
 
@@ -231,11 +271,21 @@ class ActionHeadImitationTrainer:
                 selected = set(eligible)
             unselected = set(eligible) - selected
 
+            x_seed_mode = "incumbent"
+            if (
+                self.round_dependent_seeding and frac_self_generated is not None
+                and frac_self_generated >= self.realized_seed_min_self_generated
+            ):
+                x_seed_mode = "realized"
+
             explore_examples = build_explore_buffer(
                 self.prior, self.pfn, self.bar_dist, rollout, self.n_init, self.explore_search_kwargs,
                 steps=selected if self.max_explore_steps_per_rollout is not None else None,
+                require_regret_improvement=self.require_regret_improvement,
+                k=self.explore_k, x_seed_mode=x_seed_mode,
             )
             examples += explore_examples
+            extra["explore/x_seed_mode_realized"] = float(x_seed_mode == "realized")
             n_eligible_selected = sum(int(is_explore[:, s].sum().item()) for s in selected)
             # Now reflects BOTH build_explore_buffer gates (2026-09-01):
             # has_signal (zero-weight x_int set) AND require_improvement
@@ -389,7 +439,11 @@ class ActionHeadImitationTrainer:
                 self.prior, self.n_init, self.n_steps, policy_fn=policy_fn,
                 build_interesting_points_kwargs=build_ip_kwargs,
             )
-            examples, extra_metrics = self._collect_examples(rollout)
+            frac_self_generated = None
+            if usage_counter:
+                total_actions = usage_counter.get("a", 0) + usage_counter.get("b", 0)
+                frac_self_generated = usage_counter.get("b", 0) / total_actions if total_actions else None
+            examples, extra_metrics = self._collect_examples(rollout, frac_self_generated=frac_self_generated)
             n_exploit = sum(ex.branch == "exploit" for ex in examples)
             n_explore = sum(ex.branch == "explore" for ex in examples)
 
@@ -459,14 +513,12 @@ class ActionHeadImitationTrainer:
                     metrics["exploit/target_distance"] = target_distance_sum.item() / n_exploit_examples
                 if n_explore_examples:
                     metrics["explore/weighted_nll_reduction"] = explore_reduction_sum.item() / n_explore_examples
-                if usage_counter:
+                if frac_self_generated is not None:
                     # "a" = random_policy, "b" = the ActionHead's own
                     # rollout (see the mixed_policy_fn call above) --
-                    # frac_self_generated is the "b" share.
-                    total_actions = usage_counter.get("a", 0) + usage_counter.get("b", 0)
-                    metrics["dagger/frac_self_generated"] = (
-                        usage_counter.get("b", 0) / total_actions if total_actions else float("nan")
-                    )
+                    # frac_self_generated is the "b" share, already computed
+                    # once above (also feeds round_dependent_seeding).
+                    metrics["dagger/frac_self_generated"] = frac_self_generated
                 metrics.update(extra_metrics)
                 if "exploit" in self.branches:
                     metrics["policy_nll/train_exploit"] = (

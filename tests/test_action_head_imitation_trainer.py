@@ -239,3 +239,69 @@ def test_fill_unselected_explore_steps_with_exploit_adds_filler_examples():
     assert "n_examples/exploit_filler" not in extra_no_fill
     assert extra_fill.get("n_examples/exploit_filler", 0) > 0
     assert len(examples_fill) > len(examples_no_fill)
+
+
+def test_explore_k_and_require_regret_improvement_are_accepted_and_run_end_to_end():
+    pfn, bar_dist, prior, action_head = _build(batch_size=6)
+    build_ip_kwargs = {"n_sobol": 6, "n_random": 6, "n_basin_restarts": 4}
+    trainer = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
+        n_rollouts=3, n_init=3, n_steps=6, log_every=1,
+        exploit_search_kwargs=None,
+        explore_search_kwargs={"n_restarts": 2, "n_steps": 5},
+        build_interesting_points_kwargs=build_ip_kwargs,
+        explore_k=3, require_regret_improvement=True,
+    )
+    result = trainer.run()
+    assert len(result["history"]["policy_nll/train"]) == 3
+
+
+def test_round_dependent_seeding_switches_to_realized_only_once_self_play_dominant():
+    """frac_self_generated below the threshold -> x_seed_mode stays
+    "incumbent" (extra metric 0.0); above it -> switches to "realized"
+    (extra metric 1.0). Checked directly via _collect_examples rather than
+    a full run, since that's the one place the decision is made."""
+    pfn, bar_dist, prior, action_head = _build(batch_size=6)
+    build_ip_kwargs = {"n_sobol": 6, "n_random": 6, "n_basin_restarts": 4}
+    trainer = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=prior, action_head=action_head,
+        n_rollouts=1, n_init=3, n_steps=6, log_every=1,
+        exploit_search_kwargs=None,
+        explore_search_kwargs={"n_restarts": 2, "n_steps": 5},
+        build_interesting_points_kwargs=build_ip_kwargs,
+        round_dependent_seeding=True, realized_seed_min_self_generated=0.7,
+    )
+    from anytimeacquisition.trainer.exit_rollout import random_policy, rollout_episode
+
+    torch.manual_seed(0)
+    rollout = rollout_episode(
+        trainer.prior, n_init=3, n_steps=6, policy_fn=random_policy,
+        build_interesting_points_kwargs=build_ip_kwargs,
+    )
+    _, extra_low = trainer._collect_examples(rollout, frac_self_generated=0.3)
+    assert extra_low["explore/x_seed_mode_realized"] == 0.0
+
+    torch.manual_seed(0)
+    rollout2 = rollout_episode(
+        trainer.prior, n_init=3, n_steps=6, policy_fn=random_policy,
+        build_interesting_points_kwargs=build_ip_kwargs,
+    )
+    _, extra_high = trainer._collect_examples(rollout2, frac_self_generated=0.9)
+    assert extra_high["explore/x_seed_mode_realized"] == 1.0
+
+    # round_dependent_seeding off (default) -> always "incumbent" regardless
+    # of frac_self_generated.
+    trainer_off = ActionHeadImitationTrainer(
+        pfn=pfn, bar_dist=bar_dist, prior=BNNPrior(batch_size=6, x_dim=1, seed=2), action_head=action_head,
+        n_rollouts=1, n_init=3, n_steps=6, log_every=1,
+        exploit_search_kwargs=None,
+        explore_search_kwargs={"n_restarts": 2, "n_steps": 5},
+        build_interesting_points_kwargs=build_ip_kwargs,
+    )
+    torch.manual_seed(0)
+    rollout3 = rollout_episode(
+        trainer_off.prior, n_init=3, n_steps=6, policy_fn=random_policy,
+        build_interesting_points_kwargs=build_ip_kwargs,
+    )
+    _, extra_off = trainer_off._collect_examples(rollout3, frac_self_generated=0.9)
+    assert extra_off["explore/x_seed_mode_realized"] == 0.0

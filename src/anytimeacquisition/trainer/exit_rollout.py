@@ -58,7 +58,8 @@ from anytimeacquisition.metrics.inc_auc import incumbent_trajectory
 from anytimeacquisition.models.bar_distribution import BarDistribution
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.priors.bnn import BNNPrior
-from anytimeacquisition.search.explore import explore_search, improvement_weights
+from anytimeacquisition.search.explore import explore_search, greedy_regret, improvement_weights
+from anytimeacquisition.search.kstep_explore import kstep_explore_search
 from anytimeacquisition.search.exploit import exploit_search_trajectory
 from anytimeacquisition.search.interesting_points import build_interesting_points
 
@@ -91,10 +92,30 @@ class ImitationExample:
     step: int  # rollout step (0-indexed within the n_steps policy-chosen queries, not counting n_init)
 
 
+@dataclass
+class ImitationChunkExample:
+    """Like `ImitationExample`, but the label is a `chunk_len`-point plan,
+    not a single point -- built by `build_explore_chunk_buffer` for
+    `trainer.action_head_flow_trainer.ActionHeadFlowTrainer`
+    (`models.action_head_flow.FlowMatchingActionHead`). `target_chunk[0]`
+    is the only point ever meant to be deployed at inference time (same
+    "only the first point is real" discipline as
+    `search.kstep_explore.kstep_explore_search`'s own `plan_star`) --
+    the rest exists purely to give the flow-matching head a genuine
+    multi-step target to train against, not to be executed."""
+    x_context: torch.Tensor  # [Nt, x_dim]
+    y_context: torch.Tensor  # [Nt]
+    target_chunk: torch.Tensor  # [chunk_len, x_dim]
+    branch: str  # "exploit" | "explore"
+    instance_idx: int
+    step: int
+
+
 def random_policy(x_context: torch.Tensor, y_context: torch.Tensor, x_dim: int) -> torch.Tensor:
-    """Round-0 self-play seeding placeholder (design doc §6, `docs/milestones/M5.md`):
-    uniform-random next query, ignoring context entirely. Stand-in until a
-    trained ActionHead exists to roll out under instead."""
+    """Round-0 self-play seeding placeholder (design doc §6,
+    `docs/ROADMAP.md`'s ground-truth-privileged-search lens): uniform-random
+    next query, ignoring context entirely. Stand-in until a trained
+    ActionHead exists to roll out under instead."""
     B = x_context.shape[0]
     return torch.rand(B, x_dim)
 
@@ -288,7 +309,8 @@ def build_exploit_buffer(
 def build_explore_buffer(
     prior: BNNPrior, pfn: PFN, bar_dist: BarDistribution, rollout: dict, n_init: int,
     explore_search_kwargs: dict | None = None, steps: set[int] | None = None,
-    require_improvement: bool = True,
+    require_improvement: bool = True, require_regret_improvement: bool = False,
+    k: int = 1, x_seed_mode: str = "incumbent",
 ) -> list[ImitationExample]:
     """Runs `explore_search` at every explore-labeled (instance, step) pair
     (the complement of `label_branches` -- flat steps) and collects the
@@ -323,31 +345,37 @@ def build_explore_buffer(
 
     `require_improvement=True` (default, 2026-09-01, minimal "branch
     valuation" per `archive/src/exit/PFN_ActionHead_ExpertIteration_Design.md`
-    §4 step 3 -- see the log entry above): also skips any (instance, step)
-    pair where `explore_search`'s own achieved value (`val_star`, weighted
-    NLL after adding `x_star`) is not actually BETTER than the weighted NLL
-    before -- i.e., discards corrections that made things worse, not just
-    ones with zero signal. Unlike `exploit_search` (which structurally
-    cannot regress: it falls back to the known incumbent whenever every
-    restart fails to beat it), `explore_search` has no such guarantee --
-    its own docstring is explicit that "no privileged known-good x exists
-    to fall back to here." Before this gate, ALL corrections were trusted
-    as imitation targets regardless of quality; `docs/milestones/M5.md`'s
-    own earlier finding (only 18.5% of individual explore corrections
-    strictly reduce true regret, 14.3% make it worse) is direct evidence
-    that an unfiltered BC objective was being trained toward a
-    net-harmful-about-as-often-as-helpful signal. Not a full AlphaZero-style
-    value-head/rollout valuation (`train_value_head` still off by default,
-    no rollout continuation) -- reuses the SAME before/after weighted-NLL
-    computation `trainer.action_head_imitation_trainer._step_loss` already
-    did purely for diagnostics (`explore/weighted_nll_reduction`), now
-    applied as an actual gate rather than just logged after the fact. The
-    0.86 correlation between weighted-NLL improvement and true regret
-    reduction (`pipelines/explore_search_playground.py`'s own finding,
-    cited in `docs/milestones/M5.md`) is why this cheap proxy is expected
-    to capture most of the value of a full valuation step without the
-    extra rollout/value-head machinery. Set False to recover the old
-    (unfiltered) behavior for comparison/ablation.
+    §4 step 3): also skips any (instance, step) pair where `explore_search`'s
+    own achieved value (`val_star`, weighted NLL after adding `x_star`) is
+    not actually BETTER than the weighted NLL before -- i.e., discards
+    corrections that made things worse, not just ones with zero signal.
+    Unlike `exploit_search` (which structurally cannot regress: it falls
+    back to the known incumbent whenever every restart fails to beat it),
+    `explore_search` has no such guarantee -- its own docstring is explicit
+    that "no privileged known-good x exists to fall back to here." Set False
+    to recover the pre-2026-09-01 (fully unfiltered) behavior for
+    comparison/ablation.
+
+    **This gate is a proxy, not a regret gate, and the distinction is
+    load-bearing, not pedantic.** Weighted-NLL improving means the search's
+    own optimized quantity got better -- it does not mean the resulting
+    point is actually a better thing to imitate. Measured directly
+    (`greedy_regret`, `pipelines/explore_search_playground.py`) with this
+    gate already active: only 18.5% of surviving corrections strictly
+    reduced true regret at x_dim=1 (14.3% still made it worse), 55.8% at
+    x_dim=6 (20.6% worse) -- i.e. `require_improvement` alone does not
+    close the label-quality gap `docs/MILESTONES.md` tracks as this
+    project's leading bottleneck.
+
+    `require_regret_improvement=False` (default, off): when True, ALSO
+    gates on `greedy_regret` (`search.explore.greedy_regret`) strictly
+    improving -- the real regret metric the proxy above is only loosely
+    correlated with, not another proxy. Costs two extra PFN forward passes
+    per (instance, step) considered (regret before and after `x_star`); off
+    by default so existing callers/configs don't silently pay that or
+    change behavior. Turn on to test whether gating on real regret instead
+    of the weighted-NLL proxy changes downstream `auc_improvement_vs_random`
+    -- the first prioritized experiment in `docs/MILESTONES.md`.
 
     `steps`: optional allowlist of step indices to consider at all (other
     steps are skipped regardless of labeling) -- unset (default) considers
@@ -355,11 +383,31 @@ def build_explore_buffer(
     `trainer.action_head_imitation_trainer`'s `max_explore_steps_per_rollout`
     to bound how many (expensive, PFN-forward/backward-bearing)
     `explore_search` calls a single rollout pays for.
+
+    `k=1` (default): 1-step `explore_search`, unchanged behavior. `k>1`:
+    `search.kstep_explore.kstep_explore_search` instead -- joint short-plan
+    lookahead, keeping only the first point as the label (see that
+    module's docstring; `val_star` used here is already the honest,
+    standalone-rescored value by construction, not the plan's own
+    optimistic joint score).
+
+    `x_seed_mode`: `"incumbent"` (default) -- context-visible incumbent,
+    safe under any rollout policy including `random_policy` (see the
+    `x_realized`-collapse history above). `"realized"` -- seed at the point
+    the rollout's OWN policy actually played this step instead
+    (`rollout["x_context"][:, n_init+step]`); only sound once that policy
+    is genuinely context-dependent (NOT under `random_policy`, where this
+    reproduces the collapse `"incumbent"` was introduced to fix) --
+    `trainer.action_head_imitation_trainer` decides which mode to use per
+    rollout based on how self-play-dominant that rollout's DAgger mixing
+    already is, not left to be chosen blindly here.
     """
     assert "x_int" in rollout and "y_int_true" in rollout, (
         "rollout must be built with rollout_episode(..., build_interesting_points_kwargs=...) "
         "to use the explore branch"
     )
+    if x_seed_mode not in ("incumbent", "realized"):
+        raise ValueError(f"x_seed_mode must be 'incumbent' or 'realized', got {x_seed_mode!r}")
     explore_search_kwargs = explore_search_kwargs or {}
     is_exploit = label_branches(rollout["y_context"], n_init)  # [B, n_steps]
     is_explore = ~is_exploit
@@ -371,11 +419,136 @@ def build_explore_buffer(
         step_mask = is_explore[:, step]
         if not step_mask.any():
             continue
-        incumbent_idx = y_ctx.argmin(dim=1)
-        x_seed = x_ctx[torch.arange(x_ctx.shape[0]), incumbent_idx]  # [B, x_dim] -- context-visible seed, see docstring above
-        x_star, val_star, has_signal = explore_search(
+        if x_seed_mode == "incumbent":
+            incumbent_idx = y_ctx.argmin(dim=1)
+            x_seed = x_ctx[torch.arange(x_ctx.shape[0]), incumbent_idx]  # [B, x_dim] -- context-visible seed
+        else:  # "realized" -- validated at function entry, only these two values reach here
+            # The point the rollout's OWN policy actually played at this
+            # step -- x_context grows by concatenation every step
+            # (rollout_episode), so column n_init+step is exactly that
+            # step's realized action, regardless of which policy chose it.
+            x_seed = rollout["x_context"][:, n_init + step]  # [B, x_dim]
+        if k <= 1:
+            x_star, val_star, has_signal = explore_search(
+                prior, pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"], x_seed,
+                **explore_search_kwargs,
+            )
+        else:
+            # kstep_explore_search's val_star is ALREADY the honest,
+            # standalone-rescored value (mandatory by construction, see
+            # search/kstep_explore.py's module docstring) -- safe to use
+            # here exactly like explore_search's own val_star, no extra
+            # re-scoring needed at this call site. plan_star/joint_val are
+            # diagnostics only, discarded here.
+            x_star, val_star, has_signal, _plan_star, _joint_val = kstep_explore_search(
+                prior, pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"], x_seed,
+                k=k, **explore_search_kwargs,
+            )
+        if require_improvement:
+            with torch.no_grad():
+                incumbent_val = y_ctx.min(dim=1).values
+                weights = improvement_weights(incumbent_val, rollout["y_int_true"])
+                nll_before = bar_dist(pfn(x_ctx, y_ctx, rollout["x_int"]), rollout["y_int_true"])
+                weighted_before = (weights * nll_before).sum(dim=-1)
+            has_signal = has_signal & (val_star < weighted_before)
+        if require_regret_improvement:
+            with torch.no_grad():
+                regret_before = greedy_regret(pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"])
+                y_star_true = prior.evaluate(x_star.unsqueeze(1), noise=False)  # [B, 1] -- teacher-forced, not a guess
+                x_ctx_aug = torch.cat([x_ctx, x_star.unsqueeze(1)], dim=1)
+                y_ctx_aug = torch.cat([y_ctx, y_star_true], dim=1)
+                regret_after = greedy_regret(pfn, bar_dist, x_ctx_aug, y_ctx_aug, rollout["x_int"], rollout["y_int_true"])
+            has_signal = has_signal & (regret_after < regret_before)
+        for b in torch.nonzero(step_mask & has_signal, as_tuple=False).squeeze(-1).tolist():
+            buffer.append(ImitationExample(
+                x_context=x_ctx[b].clone(), y_context=y_ctx[b].clone(),
+                x_star=x_star[b].detach().clone(), y_star=val_star[b].detach().clone(),
+                branch="explore", instance_idx=b, step=step,
+            ))
+    return buffer
+
+
+def build_exploit_chunk_buffer(
+    prior: BNNPrior, rollout: dict, n_init: int, chunk_len: int,
+    exploit_search_kwargs: dict | None = None, steps: set[int] | None = None, require_exploit_label: bool = True,
+) -> list[ImitationChunkExample]:
+    """`build_exploit_buffer`'s chunk-target analogue, for
+    `trainer.action_head_flow_trainer.ActionHeadFlowTrainer`. `exploit_search`
+    (unlike `search.kstep_explore.kstep_explore_search`) has no k-step
+    generalization yet -- see `docs/MILESTONES.md`'s bottleneck list -- so
+    this is a deliberate, documented simplification, not an oversight: the
+    single-point exploit correction is repeated `chunk_len` times to form a
+    degenerate but valid, in-domain chunk target. Every position in the
+    chunk points at the same, already-privileged-optimal-for-1-step
+    incumbent refinement; only `target_chunk[0]` is ever deployed
+    regardless (same discipline as everywhere else k-step-flavored),
+    so this costs the flow head some wasted representational capacity on
+    the exploit branch specifically, not correctness."""
+    exploit_search_kwargs = exploit_search_kwargs or {}
+    is_exploit = label_branches(rollout["y_context"], n_init)  # [B, n_steps]
+    x_star, y_star = exploit_search_trajectory(
+        prior, rollout["x_context"], rollout["y_context"], n_init, **exploit_search_kwargs,
+    )  # [B, n_steps, x_dim], [B, n_steps]
+
+    buffer: list[ImitationChunkExample] = []
+    n_steps = is_exploit.shape[1]
+    for step in range(n_steps):
+        if steps is not None and step not in steps:
+            continue
+        step_mask = is_exploit[:, step] if require_exploit_label else ~is_exploit[:, step]
+        if not step_mask.any():
+            continue
+        x_ctx, y_ctx = rollout["pre_step_contexts"][step]
+        for b in torch.nonzero(step_mask, as_tuple=False).squeeze(-1).tolist():
+            target_chunk = x_star[b, step].detach().unsqueeze(0).expand(chunk_len, -1).clone()
+            buffer.append(ImitationChunkExample(
+                x_context=x_ctx[b].clone(), y_context=y_ctx[b].clone(), target_chunk=target_chunk,
+                branch="exploit", instance_idx=b, step=step,
+            ))
+    return buffer
+
+
+def build_explore_chunk_buffer(
+    prior: BNNPrior, pfn: PFN, bar_dist: BarDistribution, rollout: dict, n_init: int, chunk_len: int,
+    explore_search_kwargs: dict | None = None, steps: set[int] | None = None,
+    require_improvement: bool = True, require_regret_improvement: bool = False, x_seed_mode: str = "incumbent",
+) -> list[ImitationChunkExample]:
+    """`build_explore_buffer`'s chunk-target analogue, for
+    `trainer.action_head_flow_trainer.ActionHeadFlowTrainer` -- runs
+    `search.kstep_explore.kstep_explore_search(..., k=chunk_len)` at every
+    explore-labeled (instance, step) pair and keeps the FULL plan
+    (`plan_star`) as the target, not just its first point. Gating
+    (`require_improvement`/`require_regret_improvement`) and seeding
+    (`x_seed_mode`) work identically to `build_explore_buffer` -- both
+    checked against `val_star`, which is `plan_star[0]`'s own honest,
+    standalone-rescored value (mandatory by construction of
+    `kstep_explore_search`, not the plan's inflated joint score), same
+    label-quality guarantee as the single-point buffer."""
+    assert "x_int" in rollout and "y_int_true" in rollout, (
+        "rollout must be built with rollout_episode(..., build_interesting_points_kwargs=...) "
+        "to use the explore branch"
+    )
+    if x_seed_mode not in ("incumbent", "realized"):
+        raise ValueError(f"x_seed_mode must be 'incumbent' or 'realized', got {x_seed_mode!r}")
+    explore_search_kwargs = explore_search_kwargs or {}
+    is_explore = ~label_branches(rollout["y_context"], n_init)  # [B, n_steps]
+
+    buffer: list[ImitationChunkExample] = []
+    for step, (x_ctx, y_ctx) in enumerate(rollout["pre_step_contexts"]):
+        if steps is not None and step not in steps:
+            continue
+        step_mask = is_explore[:, step]
+        if not step_mask.any():
+            continue
+        if x_seed_mode == "incumbent":
+            incumbent_idx = y_ctx.argmin(dim=1)
+            x_seed = x_ctx[torch.arange(x_ctx.shape[0]), incumbent_idx]
+        else:
+            x_seed = rollout["x_context"][:, n_init + step]
+
+        x_star, val_star, has_signal, plan_star, _joint_val = kstep_explore_search(
             prior, pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"], x_seed,
-            **explore_search_kwargs,
+            k=chunk_len, **explore_search_kwargs,
         )
         if require_improvement:
             with torch.no_grad():
@@ -384,10 +557,18 @@ def build_explore_buffer(
                 nll_before = bar_dist(pfn(x_ctx, y_ctx, rollout["x_int"]), rollout["y_int_true"])
                 weighted_before = (weights * nll_before).sum(dim=-1)
             has_signal = has_signal & (val_star < weighted_before)
+        if require_regret_improvement:
+            with torch.no_grad():
+                regret_before = greedy_regret(pfn, bar_dist, x_ctx, y_ctx, rollout["x_int"], rollout["y_int_true"])
+                y_star_true = prior.evaluate(x_star.unsqueeze(1), noise=False)
+                x_ctx_aug = torch.cat([x_ctx, x_star.unsqueeze(1)], dim=1)
+                y_ctx_aug = torch.cat([y_ctx, y_star_true], dim=1)
+                regret_after = greedy_regret(pfn, bar_dist, x_ctx_aug, y_ctx_aug, rollout["x_int"], rollout["y_int_true"])
+            has_signal = has_signal & (regret_after < regret_before)
         for b in torch.nonzero(step_mask & has_signal, as_tuple=False).squeeze(-1).tolist():
-            buffer.append(ImitationExample(
+            buffer.append(ImitationChunkExample(
                 x_context=x_ctx[b].clone(), y_context=y_ctx[b].clone(),
-                x_star=x_star[b].detach().clone(), y_star=val_star[b].detach().clone(),
+                target_chunk=plan_star[b].detach().clone(),
                 branch="explore", instance_idx=b, step=step,
             ))
     return buffer

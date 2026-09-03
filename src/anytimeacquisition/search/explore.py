@@ -86,6 +86,34 @@ def improvement_weights(incumbent: torch.Tensor, y_int_true: torch.Tensor, eps: 
     return (torch.log(incumbent.clamp_min(eps)).unsqueeze(-1) - torch.log(y_int_true.clamp_min(eps))).clamp_min(0.0)
 
 
+@torch.no_grad()
+def greedy_regret(
+    pfn: PFN, bar_dist: BarDistribution, x_context: torch.Tensor, y_context: torch.Tensor,
+    x_int: torch.Tensor, y_int_true: torch.Tensor,
+) -> torch.Tensor:
+    """True regret of the model's own greedy pick among `x_int` (argmin of
+    predicted mean), given `x_context`/`y_context`. Non-differentiable,
+    diagnostic-only -- moved here (from `pipelines/explore_search_playground.py`,
+    which still re-exports it for backward compatibility) so
+    `trainer/exit_rollout.py` can use it as an actual label-quality gate,
+    not just a post-hoc diagnostic, without a circular import (that pipeline
+    already imports from `trainer/exit_rollout.py`).
+
+    This is the metric `docs/MILESTONES.md`'s explore-search numbers are
+    measured in: weighted-NLL improving (what `explore_search`/
+    `improvement_weights` actually optimize) is a proxy for this, not the
+    same claim -- see `build_explore_buffer`'s `require_regret_improvement`
+    for why that distinction is load-bearing, not pedantic.
+    x_context/y_context: [B,Nt,x_dim]/[B,Nt]  x_int/y_int_true: [B,N_int,x_dim]/[B,N_int]
+    -> [B]."""
+    predicted_means = bar_dist.mean(pfn(x_context, y_context, x_int))  # [B, N_int]
+    greedy_idx = predicted_means.argmin(dim=1)  # [B]
+    B = x_context.shape[0]
+    picked_y = y_int_true[torch.arange(B), greedy_idx]
+    best_y = y_int_true.min(dim=1).values
+    return picked_y - best_y
+
+
 def _weighted_nll(
     pfn: PFN, bar_dist: BarDistribution, x_context: torch.Tensor, y_context: torch.Tensor,
     x_explore: torch.Tensor, y_explore_true: torch.Tensor, x_int: torch.Tensor, y_int_true: torch.Tensor,
