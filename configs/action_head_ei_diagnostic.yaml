@@ -1,0 +1,74 @@
+# Top-level Hydra config for pipelines/action_head_ei_diagnostic.py --
+# separate composition from configs/config.yaml/configs/train_pfn.yaml/
+# configs/train_exit.yaml, same reasoning as action_head_posterior_distill's
+# own former config (see git history / docs/log/2026-09-02-actionhead-
+# search-depth-design-options.md): this pipeline loads an already-trained,
+# frozen PFN (configs/pfn_checkpoint/) and trains only an ActionHead,
+# against a KNOWN, closed-form EI target read off that PFN's own posterior
+# -- not the privileged-search oracle. x_dim=1 only (see the pipeline
+# module's docstring for why).
+#
+# Swap to a different trained checkpoint via `pfn_checkpoint=<name>` (see
+# configs/pfn_checkpoint/) -- `priors.x_dim` below only interpolates from
+# `pfn_checkpoint.max_x_dim` by default for the natural x_dim=1 case
+# (pfn_smoke_xdim1); a checkpoint with a larger max_x_dim (e.g.
+# pfn_variable_xdim_smoke.pt, max_x_dim=6) needs `priors.x_dim=1` set
+# explicitly too, e.g.:
+#   uv run python -m anytimeacquisition.pipelines.action_head_ei_diagnostic \
+#     pfn_checkpoint=variable_xdim_smoke priors.x_dim=1 allow_dirty=true
+# `main()` reads the REAL/active x_dim from `priors.x_dim`, not the
+# checkpoint's own `max_x_dim` capacity -- see its own comment for why.
+defaults:
+  - priors: bnn
+  - pfn_checkpoint: smoke_xdim1
+  - callbacks: mlflow
+  - _self_
+  - optional experiment: null
+
+seed: 0
+allow_dirty: false
+
+hydra:
+  run:
+    dir: ${aa_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${aa_root:}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
+# Own MLflow experiment -- diagnostic runs against an already-frozen
+# checkpoint, distinct from action_head_posterior_distill's own experiment.
+callbacks:
+  mlflow:
+    experiment_name: anytimeacquisition-action-head-ei-diagnostic
+
+priors:
+  x_dim: ${pfn_checkpoint.max_x_dim}
+  batch_size: 16
+
+n_train_context: 10
+memorize_steps: 150
+generalize_steps: 400
+eval_contexts: 50
+# Dense-grid resolution for the EI-argmax oracle (models/baselines/
+# pfn_acquisition.py::pfn_ei_argmax) -- x_dim=1 so this is cheap; bump for
+# a tighter argmax if the memorize stage's loss floor looks resolution-
+# limited rather than optimization-limited.
+n_grid: 500
+lr: 3.0e-3
+log_every: 25
+# How often (in steps, during stage 2/generalize-real only) to log a
+# plot_training_snapshot figure showing the ActionHead's prediction on one
+# FIXED held-out context, so a sequence of these visualizes convergence
+# over training -- null (default) turns this off entirely (each snapshot
+# costs one extra PFN forward + a matplotlib render + an MLflow artifact
+# write, non-trivial at a fine cadence over a long run).
+snapshot_every: null
+
+# ActionHead's own capacity -- independent of the frozen PFN's size
+# (pfn_d_model/pfn_n_layers are read from the checkpoint at runtime, not
+# set here). Defaults match ActionHead's own constructor defaults.
+action_head:
+  d_model: 64
+  n_heads: 4
+  d_ff: 128
+  dropout: 0.0

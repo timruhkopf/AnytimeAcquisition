@@ -1,0 +1,26 @@
+# @package _global_
+# Real (non-smoke) PFN checkpoint -- pfn_variable_xdim_smoke.pt, trained
+# with variable x_dim up to 6 (priors/bnn.yaml's variable_dim_min) -- used
+# here at x_dim=1 (real active dims), decoupled from the checkpoint's own
+# max_x_dim=6 capacity via priors.x_dim (see action_head_ei_diagnostic.py's
+# main(), which reads x_dim from priors.x_dim, not the checkpoint's
+# max_x_dim -- PFN.forward's automatic n_features=x.shape[-1] fallback
+# handles the rest, see models/pfn.py's _pad_and_rescale_features).
+#
+# Pair with pfn_checkpoint=variable_xdim_smoke on the CLI (same convention
+# as configs/experiment/action_head_imitation_integrated_real.yaml) --
+# this experiment file alone does NOT swap the pfn_checkpoint group
+# default, only CLI overrides do that cleanly:
+#   uv run python -m anytimeacquisition.pipelines.action_head_ei_diagnostic \
+#     experiment=action_head_ei_diagnostic_variable_xdim \
+#     pfn_checkpoint=variable_xdim_smoke allow_dirty=true
+priors:
+  x_dim: 1
+  batch_size: 16
+
+n_train_context: 10
+memorize_steps: 300
+generalize_steps: 2000
+eval_contexts: 100
+n_grid: 1000
+snapshot_every: 100

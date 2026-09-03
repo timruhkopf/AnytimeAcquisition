@@ -1,0 +1,13 @@
+# Expected Improvement on the frozen PFN's own PPD (M5/M6) -- a *different*
+# surrogate from configs/models/baselines/ei.yaml's GP+EI (see
+# models/baselines/pfn_acquisition.py's module docstring). `_partial_: true`
+# makes `instantiate(cfg, pfn=..., bar_dist=...)` return a
+# `functools.partial(pfn_acquisition_policy, pfn=..., bar_dist=..., ...)`
+# callable matching `policy_fn(x_context, y_context, x_dim)`'s signature --
+# drop straight into `trainer.exit_rollout.rollout_episode` as `policy_fn`.
+# `pfn`/`bar_dist` are NOT set here (they come from a loaded checkpoint at
+# runtime, same reason configs/pfn_checkpoint/*.yaml doesn't embed the model
+# itself) -- pass them as instantiate() kwargs.
+_target_: anytimeacquisition.models.baselines.pfn_acquisition.pfn_acquisition_policy
+_partial_: true
+n_grid: 1000
