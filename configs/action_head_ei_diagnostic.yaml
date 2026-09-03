@@ -8,10 +8,16 @@
 # -- not the privileged-search oracle. x_dim=1 only (see the pipeline
 # module's docstring for why).
 #
-# Swap to a different trained x_dim=1 checkpoint via `pfn_checkpoint=<name>`
-# rather than overriding checkpoint_path/priors.x_dim directly, e.g.:
+# Swap to a different trained checkpoint via `pfn_checkpoint=<name>` (see
+# configs/pfn_checkpoint/) -- `priors.x_dim` below only interpolates from
+# `pfn_checkpoint.max_x_dim` by default for the natural x_dim=1 case
+# (pfn_smoke_xdim1); a checkpoint with a larger max_x_dim (e.g.
+# pfn_variable_xdim_smoke.pt, max_x_dim=6) needs `priors.x_dim=1` set
+# explicitly too, e.g.:
 #   uv run python -m anytimeacquisition.pipelines.action_head_ei_diagnostic \
-#     allow_dirty=true
+#     pfn_checkpoint=variable_xdim_smoke priors.x_dim=1 allow_dirty=true
+# `main()` reads the REAL/active x_dim from `priors.x_dim`, not the
+# checkpoint's own `max_x_dim` capacity -- see its own comment for why.
 defaults:
   - priors: bnn
   - pfn_checkpoint: smoke_xdim1
@@ -50,6 +56,13 @@ eval_contexts: 50
 n_grid: 500
 lr: 3.0e-3
 log_every: 25
+# How often (in steps, during stage 2/generalize-real only) to log a
+# plot_training_snapshot figure showing the ActionHead's prediction on one
+# FIXED held-out context, so a sequence of these visualizes convergence
+# over training -- null (default) turns this off entirely (each snapshot
+# costs one extra PFN forward + a matplotlib render + an MLflow artifact
+# write, non-trivial at a fine cadence over a long run).
+snapshot_every: null
 
 # ActionHead's own capacity -- independent of the frozen PFN's size
 # (pfn_d_model/pfn_n_layers are read from the checkpoint at runtime, not

@@ -98,7 +98,14 @@ def run_stage(
     n_steps: int, n_train: int, lr: float, blind: bool, seed: int, log_every: int,
     fixed_context: tuple[torch.Tensor, torch.Tensor] | None = None, n_grid: int = 1000,
     on_log: Callable[[int, dict], None] | None = None,
+    snapshot_every: int | None = None, snapshot_fn: Callable[[int, ActionHead], None] | None = None,
 ) -> list[float]:
+    """`snapshot_fn(step, action_head)`, if given, fires every
+    `snapshot_every` steps (plus the final step) -- independent of
+    `on_log`'s scalar metrics, this is the "keep visualizing at multiple
+    iterations" hook (see `run_diagnostic`), fired with the CURRENT,
+    still-training `action_head` so the caller can render its prediction
+    at that point in training, not just at the end."""
     torch.manual_seed(seed)
     opt = torch.optim.AdamW(action_head.parameters(), lr=lr)
     losses = []
@@ -122,6 +129,8 @@ def run_stage(
             print(f"    step {step:4d}  beta_nll {loss.item():8.4f}")
             if on_log is not None:
                 on_log(step, {"beta_nll": loss.item()})
+        if snapshot_fn is not None and snapshot_every and (step % snapshot_every == 0 or step == n_steps - 1):
+            snapshot_fn(step, action_head)
     return losses
 
 
@@ -146,55 +155,123 @@ def eval_mean_l1(
     return total / count
 
 
+def _context_diagnostics(
+    pfn: PFN, bar_dist: BarDistribution, action_head: ActionHead,
+    x_train: torch.Tensor, y_train: torch.Tensor, true_fn_prior: BNNPrior, n_grid: int = 1000,
+) -> dict:
+    """Everything needed to render one context's two-row diagnostic panel.
+    `x_train`/`y_train` and `true_fn_prior` must all be a SINGLE instance
+    (batch size 1) -- `true_fn_prior` is the *same* `BNNPrior` instance
+    that produced `x_train`/`y_train` (via `sample_episode`), so
+    `true_fn_prior.evaluate(..., noise=False)` gives the exact ground-truth
+    function these samples came from, not an unrelated draw. Multi-context
+    callers construct/loop one fresh single-instance prior per context
+    (see `plot_ei_diagnostic`); the training-snapshot caller reuses one
+    fixed instance across every snapshot (see `plot_training_snapshot`).
+    -> dict of plain tensors/scalars, ready to plot -- kept separate from
+    plotting itself so the same computation backs both the multi-context
+    end-of-run summary and the per-snapshot training-progress figure."""
+    x_star, grid, ei_grid = pfn_ei_argmax(pfn, bar_dist, x_train, y_train, n_grid=n_grid)
+    aux = canonical_aux_features(x_train, y_train)
+    with torch.no_grad():
+        out = action_head(pfn, x_train, y_train, aux, blind=False)
+        pred = beta_mode(out["alpha"], out["beta"])
+        grid_batched = grid.unsqueeze(0).expand(x_train.shape[0], -1, -1)
+        logits_grid = pfn(x_train, y_train, grid_batched)  # [1, n_grid, n_bins] -- "the logits of the pfn"
+        density = torch.softmax(logits_grid, dim=-1)[0]  # [n_grid, n_bins]
+        mean_grid = bar_dist.mean(logits_grid)[0]
+        true_y_grid = true_fn_prior.evaluate(grid_batched, noise=False)[0]  # the actual BNN function, noise-free
+    return {
+        "grid": grid.squeeze(-1), "density": density, "mean_grid": mean_grid, "true_y_grid": true_y_grid,
+        "ei_grid": ei_grid[0], "x_star": x_star[0, 0].item(), "pred": pred[0, 0].item(),
+        "x_context": x_train[0, :, 0], "y_context": y_train[0],
+    }
+
+
+def _plot_context_panel(ax_top, ax_bot, diag: dict, bar_dist: BarDistribution, title: str | None = None):
+    """Draws one context's two-row panel (heatmap+overlays / EI+argmaxes)
+    from `_context_diagnostics`'s output onto a pre-existing pair of axes
+    -- shared by `plot_ei_diagnostic` (multi-context grid) and
+    `plot_training_snapshot` (single, fixed context, called repeatedly
+    during training). -> the imshow AxesImage (caller attaches a shared
+    colorbar to it)."""
+    grid = diag["grid"]
+    im = ax_top.imshow(
+        diag["density"].T, origin="lower", aspect="auto",
+        extent=[0.0, 1.0, bar_dist.borders[0].item(), bar_dist.borders[-1].item()],
+        cmap="viridis",
+    )
+    ax_top.plot(grid, diag["true_y_grid"], color="white", linewidth=1.5, label="true f(x)")
+    ax_top.plot(grid, diag["mean_grid"], color="tab:orange", linestyle="--", linewidth=1.2, label="PFN mean")
+    ax_top.scatter(diag["x_context"], diag["y_context"], color="red", marker="x", s=20, label="samples")
+    if title is not None:
+        ax_top.set_title(title)
+
+    ax_bot.plot(grid, diag["ei_grid"], color="tab:orange", label="EI(x)")
+    ax_bot.axvline(diag["x_star"], color="tab:red", linestyle="--", label="EI argmax")
+    ax_bot.axvline(diag["pred"], color="tab:cyan", linestyle=":", linewidth=2, label="ActionHead")
+    ax_bot.scatter(diag["x_context"], torch.zeros_like(diag["x_context"]), color="red", marker="x", s=15)
+    return im
+
+
 def plot_ei_diagnostic(
     pfn: PFN, bar_dist: BarDistribution, action_head: ActionHead, prior: BNNPrior,
     n_contexts: int = 4, n_train: int = 10, n_grid: int = 1000, seed: int = 12345,
 ):
-    """A small grid of held-out-context subplots, two rows per context:
-    top = the frozen PFN's own posterior over the grid, decoded from its
-    logits (mean +/- std, plus the context points and incumbent) -- "the
-    logits of the pfn" this diagnostic is meant to expose, not just the
-    downstream EI number; bottom = the ground-truth EI curve, its argmax,
-    and the trained ActionHead's own `beta_mode` prediction overlaid -- the
-    direct visual check "did the policy converge near the true argmax",
-    not just an aggregate L1 number. -> matplotlib Figure (caller
-    saves/logs it)."""
+    """A small grid of held-out-context subplots (a fresh single-instance
+    `BNNPrior` per context, so each one's ground-truth function is exactly
+    the instance that produced its samples -- `prior` here is only read for
+    its `x_dim`, not reused as the actual instance source). Two rows per
+    context: top = the frozen PFN's own predictive density heatmap over the
+    grid ("the logits of the pfn"), overlaid with the true BNN function,
+    the posterior mean, and the samples; bottom = the ground-truth EI
+    curve, its argmax, and the trained ActionHead's own `beta_mode`
+    prediction -- the direct visual check "did the policy converge near
+    the true argmax", not just an aggregate L1 number.
+    -> matplotlib Figure (caller saves/logs it)."""
     torch.manual_seed(seed)
-    fig, axes = plt.subplots(2, n_contexts, figsize=(4 * n_contexts, 6), sharex=True)
+    fig, axes = plt.subplots(2, n_contexts, figsize=(4 * n_contexts, 6.5), sharex=True)
     if n_contexts == 1:
         axes = axes.reshape(2, 1)
+    im = None
     for i in range(n_contexts):
-        ax_post, ax_ei = axes[0, i], axes[1, i]
-        prior.reset()
-        x_train, y_train, _, _ = prior.sample_episode(n_train=n_train, n_test=0)
-        x_star, grid, ei_grid = pfn_ei_argmax(pfn, bar_dist, x_train, y_train, n_grid=n_grid)
-        aux = canonical_aux_features(x_train, y_train)
-        with torch.no_grad():
-            out = action_head(pfn, x_train, y_train, aux, blind=False)
-            pred = beta_mode(out["alpha"], out["beta"])
-            grid_batched = grid.unsqueeze(0).expand(x_train.shape[0], -1, -1)
-            logits_grid = pfn(x_train, y_train, grid_batched)  # [B, n_grid, n_bins] -- "the logits of the pfn"
-            mean_grid = bar_dist.mean(logits_grid)[0]
-            std_grid = bar_dist.variance(logits_grid)[0].clamp_min(0.0).sqrt()
-        incumbent = y_train.min(dim=1).values[0].item()
-
-        x_axis = grid.squeeze(-1)
-        ax_post.plot(x_axis, mean_grid, color="tab:green", label="PFN mean")
-        ax_post.fill_between(x_axis, mean_grid - std_grid, mean_grid + std_grid, color="tab:green", alpha=0.2)
-        ax_post.scatter(x_train[0, :, 0], y_train[0], color="black", marker="x", s=15, label="context")
-        ax_post.axhline(incumbent, color="gray", linestyle="--", linewidth=1, label="incumbent")
-        ax_post.set_title(f"context {i}")
-
-        ax_ei.plot(x_axis, ei_grid[0], color="tab:orange", label="EI(x)")
-        ax_ei.axvline(x_star[0].item(), color="tab:red", linestyle="--", label="EI argmax")
-        ax_ei.axvline(pred[0, 0].item(), color="tab:blue", linestyle=":", label="ActionHead")
-        ax_ei.scatter(x_train[0, :, 0], torch.zeros_like(x_train[0, :, 0]), color="black", marker="x", s=15)
-        ax_ei.set_xlabel("x")
+        viz_prior = BNNPrior(batch_size=1, x_dim=prior.d, seed=seed * 1000 + i)
+        viz_prior.reset()
+        x_train, y_train, _, _ = viz_prior.sample_episode(n_train=n_train, n_test=0)
+        diag = _context_diagnostics(pfn, bar_dist, action_head, x_train, y_train, viz_prior, n_grid=n_grid)
+        im = _plot_context_panel(axes[0, i], axes[1, i], diag, bar_dist, title=f"context {i}")
+        axes[1, i].set_xlabel("x")
         if i == 0:
-            ax_post.set_ylabel("y (PFN posterior)")
-            ax_post.legend(fontsize=8)
-            ax_ei.set_ylabel("EI")
-            ax_ei.legend(fontsize=8)
+            axes[0, i].set_ylabel("y")
+            axes[0, i].legend(fontsize=7, loc="upper right")
+            axes[1, i].set_ylabel("EI")
+            axes[1, i].legend(fontsize=7)
+    fig.colorbar(im, ax=axes[0, :], location="right", shrink=0.8, label="density")
+    return fig
+
+
+def plot_training_snapshot(
+    pfn: PFN, bar_dist: BarDistribution, action_head: ActionHead,
+    x_train: torch.Tensor, y_train: torch.Tensor, true_fn_prior: BNNPrior,
+    n_grid: int = 1000, step: int | None = None,
+):
+    """Same two-row panel as one column of `plot_ei_diagnostic`, but for a
+    SINGLE, FIXED context (the same `(x_train, y_train, true_fn_prior)`
+    passed in on every call during training -- see
+    `run_diagnostic`'s `snapshot_fn`) so a sequence of these across steps
+    shows the ActionHead's prediction (and, incidentally, nothing else --
+    the PFN/EI/ground-truth panels are identical every time) converging
+    toward the true argmax, or not. -> matplotlib Figure (caller
+    saves/logs and closes it)."""
+    diag = _context_diagnostics(pfn, bar_dist, action_head, x_train, y_train, true_fn_prior, n_grid=n_grid)
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(6, 6.5), sharex=True)
+    im = _plot_context_panel(ax_top, ax_bot, diag, bar_dist, title=f"step {step}" if step is not None else None)
+    ax_top.set_ylabel("y")
+    ax_top.legend(fontsize=8, loc="upper right")
+    ax_bot.set_xlabel("x")
+    ax_bot.set_ylabel("EI")
+    ax_bot.legend(fontsize=8)
+    fig.colorbar(im, ax=ax_top, label="density")
     fig.tight_layout()
     return fig
 
@@ -205,6 +282,7 @@ def run_diagnostic(
     n_grid: int, lr: float, seed: int, log_every: int,
     action_head_d_model: int, action_head_n_heads: int, action_head_d_ff: int, action_head_dropout: float,
     on_log: Callable[[int, dict], None] | None = None,
+    snapshot_every: int | None = None, on_snapshot: Callable[[int, "plt.Figure"], None] | None = None,
 ) -> dict:
     """The three-stage run itself, independent of Hydra/MLflow -- `main(cfg)`
     below unpacks config into these scalar kwargs, same shape as
@@ -240,10 +318,30 @@ def run_diagnostic(
     print("\n[stage 2/3] generalize: fresh context every step, real ActionHead")
     torch.manual_seed(seed)
     real_head = build_action_head()
+
+    snapshot_fn = None
+    if snapshot_every and on_snapshot is not None:
+        # ONE fixed instance/context, sampled once and reused for every
+        # snapshot -- everything in the resulting figure (PFN density, true
+        # function, EI curve, ground-truth argmax) stays identical across
+        # snapshots except the ActionHead's own prediction, so the sequence
+        # isolates "is the policy converging" from "did the context change".
+        # A separate BNNPrior from the training `prior` above (which resets
+        # every training step) -- never reset again after this.
+        snapshot_prior = BNNPrior(batch_size=1, x_dim=x_dim, seed=seed + 777)
+        snapshot_prior.reset()
+        snap_x, snap_y, _, _ = snapshot_prior.sample_episode(n_train=n_train_context, n_test=0)
+
+        def snapshot_fn(step: int, head: ActionHead) -> None:
+            fig = plot_training_snapshot(pfn, bar_dist, head, snap_x, snap_y, snapshot_prior, n_grid=n_grid, step=step)
+            on_snapshot(step, fig)
+            plt.close(fig)
+
     real_losses = run_stage(
         pfn, bar_dist, real_head, prior, n_steps=generalize_steps, n_train=n_train_context,
         lr=lr, blind=False, seed=seed, log_every=log_every, n_grid=n_grid,
         on_log=prefixed("generalize_real"),
+        snapshot_every=snapshot_every, snapshot_fn=snapshot_fn,
     )
     real_eval_l1 = eval_mean_l1(
         pfn, bar_dist, real_head, prior, n_contexts=eval_contexts, n_train=n_train_context,
@@ -305,7 +403,18 @@ def main(cfg: DictConfig) -> dict:
     checkpoint_path = cfg.pfn_checkpoint.checkpoint_path
     pfn, bar_dist, ckpt = load_pfn_checkpoint(checkpoint_path)
     print(f"loaded PFN checkpoint: {Path(checkpoint_path).name}, config={ckpt['config']}")
-    x_dim = ckpt["config"]["max_x_dim"]
+    # x_dim here is the REAL/active dims this diagnostic run uses (always
+    # 1 -- pfn_ei_argmax's dense-grid oracle is 1D-only), read from
+    # cfg.priors.x_dim -- deliberately NOT the checkpoint's own
+    # max_x_dim (its built capacity). These coincide for pfn_smoke_xdim1
+    # (max_x_dim=1) but differ for a checkpoint like
+    # pfn_variable_xdim_smoke.pt (max_x_dim=6, used here with only 1 real
+    # dim via PFN.forward's automatic n_features=x.shape[-1] fallback --
+    # see models/pfn.py's _pad_and_rescale_features).
+    x_dim = cfg.priors.x_dim
+    assert x_dim <= ckpt["config"]["max_x_dim"], (
+        f"priors.x_dim={x_dim} exceeds this checkpoint's max_x_dim={ckpt['config']['max_x_dim']}"
+    )
     declared = {
         k: v for k, v in OmegaConf.to_container(cfg.pfn_checkpoint, resolve=True).items()
         if k not in ("checkpoint_path", "mlflow_run_id", "git_commit")
@@ -336,6 +445,8 @@ def main(cfg: DictConfig) -> dict:
             action_head_d_model=cfg.action_head.d_model, action_head_n_heads=cfg.action_head.n_heads,
             action_head_d_ff=cfg.action_head.d_ff, action_head_dropout=cfg.action_head.dropout,
             on_log=lambda step, metrics: mlflow.log_metrics(metrics, step=step),
+            snapshot_every=cfg.get("snapshot_every"),
+            on_snapshot=lambda step, fig: mlflow.log_figure(fig, f"snapshots/step_{step:05d}.png"),
         )
 
         mlflow.log_metrics({
