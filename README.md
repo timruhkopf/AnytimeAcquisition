@@ -15,10 +15,12 @@ approach: (1) a π0.5-style **ActionHead** that cross-attends into a
 control the training prior, we can search it directly with gradient
 descent to generate expert-iteration (privileged-search) imitation
 targets, without discrete-decision MCTS or RL (yet). See `docs/ROADMAP.md`
-for the full design and rationale, `docs/MILESTONES.md` for the phased
-checklist (M0-M7), and `docs/OPEN_QUESTIONS.md` for decisions that are
-intentionally still open -- check that file before assuming a design
-choice (benchmark suite, BO baseline library, medium-dim target, ...) has
+for the full design (two lenses: VLA-style architecture and ground-truth
+privileged search) and `docs/MILESTONES.md` for current component/
+conceptual status, named bottlenecks, and prioritized next experiments.
+There is no separate open-questions file right now -- treat anything not
+stated as settled in those two files as still undecided (benchmark suite,
+BO baseline library, medium-dim target, ...) and don't assume a choice has
 already been made.
 
 The repo was rebuilt from scratch on the `claude-init` branch; an earlier
@@ -39,7 +41,7 @@ torch (see `pyproject.toml`'s own comment for the full story):
 uv sync --extra cpu       # local dev / any CPU-only machine
 uv sync --extra cu124     # a CUDA 12.4 GPU machine (confirmed correct on
                           # `ulysses`; NOT yet verified on LUIS's own GPU
-                          # nodes -- see docs/OPEN_QUESTIONS.md #7)
+                          # nodes -- still open, not yet checked)
 ```
 
 Verify the install by running the test suite:
@@ -100,9 +102,9 @@ that load a frozen PFN (`action_head_posterior_distill.py`,
 `explore_search_playground.py`) reference a named entry instead of
 duplicating a raw path + dimensionality by hand.
 
-Start with `CLAUDE.md` for the full repo layout and working conventions,
-and `docs/OPEN_QUESTIONS.md` before assuming any of the still-open design
-questions above have been settled.
+Start with `CLAUDE.md` for the full repo layout and working conventions;
+nothing not stated as settled in `docs/ROADMAP.md`/`docs/MILESTONES.md`
+should be assumed decided.
 
 ## Usage
 
@@ -114,9 +116,9 @@ uv run python -m anytimeacquisition.pipelines.train_pfn experiment=pfn_smoke_xdi
 
 This trains against `priors/bnn.py`'s synthetic BNN prior and checkpoints
 to `models/pfn_smoke_xdim2.pt` (gitignored, regenerable). See
-`docs/milestones/M2.md` for what a real (non-smoke) training run should
-look like, and `configs/experiment/` for the other named configs
-(`pfn_smoke_xdim1`, `pfn_variable_xdim_smoke`, `pfn_ulysses_real`, ...).
+`docs/MILESTONES.md` for current PFN-checkpoint status, and
+`configs/experiment/` for the other named configs (`pfn_smoke_xdim1`,
+`pfn_variable_xdim_smoke`, `pfn_ulysses_real`, ...).
 
 Every component also has an interactive demo -- e.g.:
 

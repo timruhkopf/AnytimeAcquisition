@@ -53,7 +53,7 @@ express "two token types with an asymmetric, non-square attention pattern"
 without fighting it. No positional encoding anywhere: train tokens must stay
 permutation-invariant, and test tokens don't attend to each other so there's
 nothing for a position to disambiguate. No TabPFN feature-wise attention —
-see `docs/log/2026-08-27-pfns4bo-bnn-prior-comparison.md`.
+deliberately simpler than PFNs4BO's own architecture there.
 
 `self.bar_dist` (a `BarDistribution` submodule, built from `n_bins`) is
 owned by the model itself, not constructed separately alongside it --
@@ -95,9 +95,9 @@ isn't currently exercised by training, though: `priors/bnn.py`'s
 `BNNPrior` (its `active_dim`/`active_dim_mask`, `variable_dim_min` option)
 deliberately draws one **batch-uniform** active_dim, resampled fresh every
 step -- matching ifBO/PFNs4BO's own batch-level convention instead, after
-an earlier per-instance version was reverted (2026-08-31, see
-`docs/log/2026-08-31-variable-xdim-training-stagnation.md`) -- `PFNTrainer`
-passes that batch-uniform value straight through as `n_features`.
+an earlier per-instance version was reverted (stagnated in training) --
+`PFNTrainer` passes that batch-uniform value straight through as
+`n_features`.
 """
 import torch
 import torch.nn as nn

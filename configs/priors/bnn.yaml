@@ -1,5 +1,5 @@
-# x_dim is a placeholder — see docs/OPEN_QUESTIONS.md #2, the medium-dim
-# target isn't pinned yet. Override via `priors.x_dim=...` until it is.
+# x_dim is a placeholder — the medium-dim target isn't pinned yet (still
+# open). Override via `priors.x_dim=...` until it is.
 _target_: anytimeacquisition.priors.bnn.BNNPrior
 batch_size: 64
 x_dim: 5

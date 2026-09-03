@@ -1,13 +1,14 @@
 """Vectorized, ECDF-normalized BNN prior — synthetic data-generating process
-for the PFN (M2) and, doubling as an environment, for EXIT rollouts (M5).
+for the PFN, and, doubling as an environment, for EXIT rollouts (see
+`docs/ROADMAP.md`'s ground-truth-privileged-search lens).
 
 Each of the B batch elements is an independently sampled random-architecture
 tanh MLP (random depth, random width, width-compensated init scale) — a
 fresh "true function" draw per element. Init scale is NOT sampled
-independently of width — see `log_amp_range` below and `docs/log/` for why
-that used to make most draws flat, and how sampling
+independently of width — see `log_amp_range` below: most draws used to come
+out flat until this was fixed by sampling
 `depth * log(crit) = depth * log(init_std**2 * width)` directly (then
-deriving `init_std`) instead fixes it, robustly across varying depth too.
+deriving `init_std`) instead, robustly across varying depth too.
 Depth/width genuinely differ per element,
 which is why this is NOT built on `torch.func.vmap`: vmap requires uniform
 shapes/control flow across the mapped dimension, so a vmapped version would
@@ -19,15 +20,14 @@ pays off if the whole batch shares one architecture (see
 `archive/src/exit/prior/environment.py`'s `BatchedTaskFamily`, which does
 exactly that — a simpler but less faithful setup, since the design calls for
 each instance to be its own random architecture draw). Later, multistart GD
-in the search (M5) doesn't need vmap either: restarts are just extra points
-along `evaluate`'s existing N (points-per-instance) axis.
+in the privileged search doesn't need vmap either: restarts are just extra
+points along `evaluate`'s existing N (points-per-instance) axis.
 
 Preactivation/output noise, fan-in input scaling, sparseness, and spurious
 (irrelevant) input dimensions below are deliberately aligned with PFNs4BO's
 (Müller et al., ICML 2023) and ifBO's (Rakotoarison et al., ICML 2024) own
-BNN priors — see `docs/log/2026-08-27-pfns4bo-bnn-prior-comparison.md` and
-its 2026-08-28 addendum for the exact sourcing and what was deliberately
-*not* carried over (input warping — shelved, see that addendum).
+BNN priors — sourced by reading both papers directly; input warping was
+considered and deliberately not carried over (shelved).
 """
 import hashlib
 import math
@@ -46,7 +46,7 @@ class BNNPrior:
         device: str = "cpu",
         # PFNs4BO/ifBO never sample below depth 8 -- a depth-2/3 tanh MLP is
         # structurally close to incapable of multi-modal output regardless of
-        # crit (see docs/log/). Raised the floor to match, and the ceiling
+        # crit. Raised the floor to match, and the ceiling
         # further for a deeper family by default; each _raw_forward layer
         # costs the same for every instance regardless of its real depth
         # (padded + masked), so this also raises the per-call compute cost
@@ -67,8 +67,8 @@ class BNNPrior:
         # log_amp = depth * log(crit) uniformly from this range, then derive
         # log_crit = log_amp / depth, crit = exp(log_crit),
         # init_std = sqrt(crit / width). (8.0, 20.0) is picked from the same
-        # depth x crit sweep as the original crit_range fix — see docs/log/
-        # 2026-08-28's addendum — deep instances no longer need as much
+        # depth x crit sweep as the original crit_range fix — deep instances
+        # no longer need as much
         # per-layer crit to reach the same total amplification, so this
         # keeps both very shallow and very deep instances out of the boring
         # and noise-only regimes respectively.
@@ -95,7 +95,7 @@ class BNNPrior:
         frac_relevant_features: float = 0.7,
         # Optional: train across a distribution of dimensionalities rather
         # than a single fixed x_dim, matching PFNs4BO's
-        # sample_num_feaetures_get_batch (docs/log/). None (default): every
+        # sample_num_feaetures_get_batch. None (default): every
         # instance uses the full x_dim, i.e. today's behavior, unchanged.
         # Set e.g. 1: the whole batch shares one
         # active_dim ~ randint(variable_dim_min, x_dim+1), resampled fresh
@@ -113,9 +113,7 @@ class BNNPrior:
         # working hypothesis is that mixing differently-scaled instances
         # into the same batch/gradient step made optimization noisier than
         # necessary, on top of the genuine harder-in-high-dim signal you'd
-        # expect either way -- see
-        # docs/log/2026-08-31-variable-xdim-training-stagnation.md (not
-        # confirmed via a controlled rerun yet).
+        # expect either way (not confirmed via a controlled rerun yet).
         variable_dim_min: int | None = None,
         ecdf_n_samples: int = 1000,
         # ECDF-fit cost scales with n_draws * samples_per_draw (each draw is
@@ -154,8 +152,7 @@ class BNNPrior:
         # dimension's validation prior independently whiten its own raw-
         # output distribution to [0,1] would risk masking genuine
         # cross-dimension difficulty differences rather than revealing
-        # them -- see docs/log/2026-08-31-variable-xdim-training-
-        # stagnation.md. ecdf_n_samples/ecdf_n_draws/ecdf_samples_per_draw/
+        # them. ecdf_n_samples/ecdf_n_draws/ecdf_samples_per_draw/
         # cache_dir are ignored when this is given (no fitting happens).
         ecdf_sorted: torch.Tensor | None = None,
     ):
@@ -200,7 +197,7 @@ class BNNPrior:
         # Target the compounded quantity (depth * log(crit)) directly, not
         # crit alone, so deep and shallow instances both land in the "rich,
         # not noise" band instead of crit's effect scaling with depth by
-        # accident (see docs/log/ 2026-08-28 addendum).
+        # accident.
         log_amp = torch.empty(B, device=dev).uniform_(amp_lo, amp_hi, generator=gen)
         self.crit = (log_amp / self.depth.float()).exp()
         init_std = (self.crit / self.width.float()).sqrt()

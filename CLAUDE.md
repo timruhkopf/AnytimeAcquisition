@@ -5,10 +5,13 @@ repo was rebuilt from scratch on `claude-init` — the previous implementation
 lives under `archive/` for reference and deliberate porting-back, not as
 active code.
 
-See `docs/ROADMAP.md` for the phased plan, `docs/MILESTONES.md` for the
-current checklist, and `docs/OPEN_QUESTIONS.md` for decisions that are
-intentionally still open — check that file before assuming a design choice
-(benchmark suite, baseline BO library, cluster partition, etc.) has been made.
+See `docs/ROADMAP.md` for the design (two lenses: VLA-style architecture and
+ground-truth privileged search) and `docs/MILESTONES.md` for current
+component/conceptual status, named bottlenecks, and prioritized next
+experiments. There is no separate open-questions file right now — treat
+anything not stated as settled in those two files as still undecided, and
+don't silently make a call on it (benchmark suite, baseline BO library,
+cluster partition, etc.) — ask first.
 
 ## Layout
 
@@ -62,9 +65,10 @@ node's shared, so nothing long-running gets started there.
   why). `cu124` is confirmed correct on `ulysses` (`nvidia-smi`, verified
   2026-08-31) but **not yet checked on LUIS** — its GPU nodes are a
   separate machine with a possibly-different driver, don't assume it's the
-  same without checking (`docs/OPEN_QUESTIONS.md` #7).
+  same without checking (still open — no dedicated tracking file right now).
 - `scripts/submit.sh`/`scripts/slurm/train.sbatch` target LUIS (the actual
-  SLURM cluster, not `ulysses` — see `docs/OPEN_QUESTIONS.md` #4), take the
+  SLURM cluster, not `ulysses` — still needs real partition/account/QOS/time-
+  limit/GPU values filled in, also still open), take the
   pipeline module as their first argument now (used to hardcode
   `pipelines.train`), and activate a pre-built `.venv` (`source
   .venv/bin/activate`), not a conda env — sync the venv once on LUIS's
@@ -95,8 +99,9 @@ node's shared, so nothing long-running gets started there.
   `<repo_root>/mlruns`, override with the `AA_MLFLOW_DIR` env var to point at
   shared cluster storage for a run to be visible across nodes. On LUIS,
   `scripts/submit.sh`/`scripts/slurm/train.sbatch` instead redirect
-  `AA_PROJECT_ROOT` to `$BIGWORK/AnytimeAcquisition` (not `$HOME` or
-  `$PROJECT` — see `docs/OPEN_QUESTIONS.md` #6 for why), which moves
+  `AA_PROJECT_ROOT` to `$BIGWORK/AnytimeAcquisition` (not `$HOME`, whose NFS
+  quota/speed rules it out for compute jobs, or `$PROJECT`, which isn't
+  mounted on LUIS's compute nodes at all), which moves
   `mlruns/`, `outputs/`/`multirun/` (and submitit's own job-log dir nested
   under it), and `models/` there together — `AA_MLFLOW_DIR` stays available
   on top of that if you want mlflow data to live somewhere different from
@@ -136,6 +141,6 @@ node's shared, so nothing long-running gets started there.
   actually finds better labels, and showing the ActionHead's cross-attention
   into the frozen PFN's KV cache is actually carrying signal (not just
   shape-checking, e.g. a "blind" ablation comparison).
-- Don't silently make architecture/library decisions on the open items in
-  `docs/OPEN_QUESTIONS.md` (benchmark suite, BO library for baselines, cluster
-  resource specs, etc.) — ask first.
+- Don't silently make architecture/library decisions on things not settled
+  in `docs/ROADMAP.md`/`docs/MILESTONES.md` (benchmark suite, BO library for
+  baselines, cluster resource specs, etc.) — ask first.
