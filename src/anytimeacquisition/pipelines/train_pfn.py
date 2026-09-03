@@ -96,8 +96,18 @@ def load_pfn_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> tup
     reconstructs correctly from `ckpt["config"]` before `load_state_dict`
     runs -- so a *missing* `bar_dist.*` key is expected/harmless for an old
     checkpoint, but any other missing or unexpected key is a real mismatch
-    and still raises."""
+    and still raises.
+
+    A handful of early checkpoints (e.g. `pfn_ulysses_real.pt`) embedded
+    their config with the stale key `x_dim` instead of `PFN.__init__`'s
+    actual parameter name `max_x_dim` -- normalized here (in place, so
+    every downstream reader of `ckpt["config"]`, e.g. a pipeline's own
+    descriptor-vs-checkpoint validation, sees the same normalized dict) so
+    `PFN(**ckpt["config"])` below doesn't raise a `TypeError` on them."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if "x_dim" in ckpt["config"] and "max_x_dim" not in ckpt["config"]:
+        ckpt["config"] = dict(ckpt["config"])
+        ckpt["config"]["max_x_dim"] = ckpt["config"].pop("x_dim")
     model = PFN(**ckpt["config"]).to(device)
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
     ignorable_missing = {"bar_dist.borders", "bar_dist.bucket_widths"}
