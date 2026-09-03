@@ -94,6 +94,37 @@ def pfn_dims(pfn: PFN) -> tuple[int, int]:
     return pfn.train_embed.out_features, len(pfn.blocks)
 
 
+def compute_pfn_hidden_states(
+    pfn: PFN, x_train: torch.Tensor, y_train: torch.Tensor, blind: bool = False,
+) -> list[torch.Tensor]:
+    """The "run the frozen backbone once" half of what used to be bundled
+    into `ActionHead.forward` itself -- factored out so a caller that needs
+    to invoke a *head* repeatedly against the SAME context (e.g.
+    `FlowMatchingActionHead`'s multi-step denoising loop,
+    `models/action_head_flow.py`) pays for this PFN forward pass once, not
+    once per denoising iteration. `ActionHead.forward` below now calls this
+    too, so there's exactly one place this logic lives.
+
+    -> list of length `pfn_n_layers`, each `[B, n_train, pfn_d_model]` (the
+    train-token slice of that layer's hidden state -- test tokens, if any,
+    are already excluded here so callers never have to slice them out
+    themselves). `blind=True` zeroes every layer (see `ActionHead.forward`'s
+    own `blind` docstring for what this ablation isolates).
+    """
+    B = x_train.shape[0]
+    pfn.eval()
+    for p in pfn.parameters():
+        p.requires_grad_(False)
+    x_test_empty = x_train.new_zeros(B, 0, x_train.shape[-1])
+    with torch.no_grad():
+        _, hidden_states = pfn(x_train, y_train, x_test_empty, return_hidden=True)
+    n_train = x_train.shape[1]
+    hidden_states = [hs[:, :n_train, :] for hs in hidden_states]
+    if blind:
+        hidden_states = [torch.zeros_like(hs) for hs in hidden_states]
+    return hidden_states
+
+
 class CrossAttention(nn.Module):
     """Unmasked cross-attention: queries from this module's own tokens,
     keys/values already projected into this module's d_model by the caller
@@ -191,15 +222,7 @@ class ActionHead(nn.Module):
         flag exists for.
         """
         B = x_train.shape[0]
-        pfn.eval()
-        for p in pfn.parameters():
-            p.requires_grad_(False)
-        x_test_empty = x_train.new_zeros(B, 0, x_train.shape[-1])
-        with torch.no_grad():
-            _, hidden_states = pfn(x_train, y_train, x_test_empty, return_hidden=True)
-        if blind:
-            hidden_states = [torch.zeros_like(hs) for hs in hidden_states]
-        n_train = x_train.shape[1]
+        hidden_states = compute_pfn_hidden_states(pfn, x_train, y_train, blind=blind)
 
         # The cross-attention query is the FULL 5-token sequence below (the
         # action_query param + all 4 aux-feature tokens), not action_query
@@ -216,8 +239,7 @@ class ActionHead(nn.Module):
         h = torch.cat(tokens, dim=1)  # [B, 1 + len(AUX_FEATURE_NAMES), d_model]
         self_mask = torch.ones(h.shape[1], h.shape[1], dtype=torch.bool, device=h.device)
 
-        for block, layer_hidden in zip(self.blocks, hidden_states):
-            train_hidden = layer_hidden[:, :n_train, :]
+        for block, train_hidden in zip(self.blocks, hidden_states):
             h = block(h, train_hidden, self_mask)
 
         h = self.out_ln(h)

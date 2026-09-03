@@ -1,0 +1,28 @@
+# pfn/bar_dist/prior/action_head/seed/model_config/on_log/
+# extra_checkpoint_metadata/callbacks are runtime objects, passed at
+# instantiate() time in pipelines/train_exit_flow.py -- not representable
+# in YAML, same pattern as trainer/action_head_imitation_trainer.yaml.
+_target_: anytimeacquisition.trainer.action_head_flow_trainer.ActionHeadFlowTrainer
+n_rollouts: 500
+n_init: 5
+n_steps: 20
+lr: 1.0e-3
+log_every: 10
+build_interesting_points_kwargs: ${build_interesting_points_kwargs}
+# Must match action_head_flow.chunk_len below -- asserted in
+# ActionHeadFlowTrainer.__init__, not silently mismatched.
+chunk_len: 3
+num_sample_steps: 10
+exploit_search_kwargs:
+  n_restarts: 4
+  n_steps: 15
+explore_search_kwargs:
+  n_restarts: 1
+  n_steps: 15
+# Same defaults/meaning as trainer/action_head_imitation_trainer.yaml's own
+# fields -- see that file's comments for the full reasoning, unchanged here.
+require_improvement: true
+require_regret_improvement: false
+dagger_decay_rounds: auto
+dagger_beta_min: 0.05
+checkpoint_path: null  # set via an experiment config, or override directly

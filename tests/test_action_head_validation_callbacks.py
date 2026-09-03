@@ -7,11 +7,14 @@ from anytimeacquisition.callbacks.action_head_validation import (
     build_auc_eval_callback,
     build_blind_ablation_callback,
     build_explore_signal_rate_callback,
+    build_flow_auc_eval_callback,
     build_held_out_target_l1_callback,
 )
 from anytimeacquisition.models.action_head import ActionHead, pfn_dims
+from anytimeacquisition.models.action_head_flow import FlowMatchingActionHead
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.priors.bnn import BNNPrior
+from anytimeacquisition.trainer.action_head_flow_trainer import ActionHeadFlowTrainer
 from anytimeacquisition.trainer.action_head_imitation_trainer import ActionHeadImitationTrainer
 
 
@@ -137,3 +140,40 @@ def test_explore_signal_rate_callback_returns_a_rate_in_zero_one():
     assert set(metrics) == {"explore/signal_rate"}
     rate = metrics["explore/signal_rate"]
     assert math.isnan(rate) or 0.0 <= rate <= 1.0
+
+
+def _fixture_flow_trainer(x_dim=1, chunk_len=3, branches=("exploit", "explore")):
+    torch.manual_seed(0)
+    pfn = PFN(max_x_dim=x_dim, d_model=16, n_heads=2, n_layers=1, d_ff=32, n_bins=16)
+    pfn.eval()
+    pfn_d_model, pfn_n_layers = pfn_dims(pfn)
+    action_head = FlowMatchingActionHead(
+        pfn_d_model=pfn_d_model, pfn_n_layers=pfn_n_layers, x_dim=x_dim, chunk_len=chunk_len, d_model=16, n_heads=2, d_ff=32,
+    )
+    prior = BNNPrior(batch_size=4, x_dim=x_dim, seed=1)
+    build_ip_kwargs = {"n_sobol": 4, "n_random": 4, "n_basin_restarts": 2} if "explore" in branches else None
+    return ActionHeadFlowTrainer(
+        pfn=pfn, bar_dist=pfn.bar_dist, prior=prior, action_head=action_head,
+        n_init=3, n_steps=5, chunk_len=chunk_len,
+        exploit_search_kwargs={"n_restarts": 2, "n_steps": 5} if "exploit" in branches else None,
+        explore_search_kwargs={"n_restarts": 2, "n_steps": 5} if "explore" in branches else None,
+        build_interesting_points_kwargs=build_ip_kwargs,
+    )
+
+
+def test_flow_auc_eval_callback_returns_finite_metrics_comparable_to_the_simple_head():
+    """Same metric names as build_auc_eval_callback -- the whole point of
+    sharing policy_fn_builder is that a flow-trainer run and a simple-
+    trainer run produce directly comparable auc/* keys."""
+    trainer = _fixture_flow_trainer()
+    callback = build_flow_auc_eval_callback(
+        x_dim=1, n_init=3, n_steps=5, num_sample_steps=4, eval_batch_size=3, eval_seed=42,
+        ei_kwargs={"num_restarts": 2, "raw_samples": 8}, log_figure=False,
+    )
+    metrics = callback.fn(0, trainer)
+    assert set(metrics) == {
+        "auc/action_head", "auc/random", "auc/ei",
+        "auc_improvement_vs_random/mean", "auc_improvement_vs_random/std",
+        "auc_improvement_vs_random/mean_minus_std", "auc_improvement_vs_random/mean_plus_std",
+    }
+    assert _all_finite(metrics)

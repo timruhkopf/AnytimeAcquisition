@@ -1,0 +1,80 @@
+# Top-level Hydra config for pipelines/train_exit_flow.py -- separate
+# composition from configs/train_exit.yaml (same relationship
+# configs/train_pfn.yaml has to configs/config.yaml): this pipeline trains
+# a FlowMatchingActionHead (models/action_head_flow.py) against the same
+# privileged-search oracles, using search/kstep_explore.py's k-step chunk
+# targets for the explore branch instead of single points.
+#
+# Architecture groundwork (docs/MILESTONES.md's prioritized experiment 4),
+# deliberately sequenced AFTER validating configs/train_exit.yaml's simpler
+# ActionHead with better labels -- see docs/ROADMAP.md's VLA-architecture
+# lens for why. Run:
+#   uv run python -m anytimeacquisition.pipelines.train_exit_flow \
+#     experiment=action_head_flow_explore_smoke
+defaults:
+  - priors: bnn
+  - pfn_checkpoint: smoke_xdim1
+  - trainer: action_head_flow_trainer
+  - callbacks: mlflow
+  - _self_
+  - optional experiment: null
+
+seed: 0
+allow_dirty: false
+
+hydra:
+  run:
+    dir: ${aa_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${aa_root:}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
+callbacks:
+  mlflow:
+    experiment_name: anytimeacquisition-action-head-flow
+
+priors:
+  x_dim: ${pfn_checkpoint.max_x_dim}
+  batch_size: 8
+
+build_interesting_points_kwargs:
+  n_sobol: 16
+  n_random: 16
+  n_basin_restarts: 8
+
+# FlowMatchingActionHead's own capacity -- independent of the frozen PFN's
+# size (pfn_d_model/pfn_n_layers/x_dim read from the checkpoint at
+# runtime). chunk_len must match trainer.chunk_len (asserted at
+# instantiation).
+action_head_flow:
+  chunk_len: 3
+  d_model: 64
+  n_heads: 4
+  d_ff: 128
+  dropout: 0.0
+
+# Only the AUC comparison (callbacks/action_head_validation.py's
+# build_flow_auc_eval_callback) -- deliberately narrower than
+# configs/train_exit.yaml's four validation callbacks (held_out_l1/
+# blind_ablation/explore_signal_rate assume the simple ActionHead's Beta-
+# distribution interface, see that module's own docstrings; not built for
+# the flow head yet, matching this pipeline's "groundwork, not full parity"
+# scope). auc/action_head from this run and from train_exit.py's own run
+# share the same metric name/held-out protocol, so they're directly
+# comparable once both have been run.
+action_head_validation:
+  auc_eval:
+    _target_: anytimeacquisition.callbacks.action_head_validation.build_flow_auc_eval_callback
+    x_dim: ${pfn_checkpoint.max_x_dim}
+    n_init: ${trainer.n_init}
+    n_steps: ${trainer.n_steps}
+    num_sample_steps: ${trainer.num_sample_steps}
+    eval_batch_size: 8
+    eval_seed: 999
+    ei_kwargs:
+      num_restarts: 5
+      raw_samples: 64
+    n_random_restarts: 5
+    n_ei_restarts: 3
+    log_figure: true
+    every_n_steps: 50

@@ -16,7 +16,7 @@ each policy's rollout gives byte-identical underlying instances until the
 policies' own choices diverge).
 """
 from functools import partial
-from typing import Any
+from typing import Any, Callable
 
 import mlflow
 import torch
@@ -51,6 +51,7 @@ def build_auc_eval_callback(
     n_ei_restarts: int = 3,
     log_figure: bool = True,
     every_n_steps: int | None = None,
+    policy_fn_builder: Callable[[Any], Callable] | None = None,
 ) -> Callback:
     """The project's north-star metric (`docs/ROADMAP.md`): mean
     `log_incumbent_auc` for the ActionHead's *current* policy
@@ -101,6 +102,16 @@ def build_auc_eval_callback(
     list like `dim_validation.py` -- avoids per-dimension metric-name bloat
     for a callback whose whole point is the action_head/random/EI
     comparison, not a dimensionality sweep.
+
+    `policy_fn_builder`: `trainer -> policy_fn`, default `None` uses
+    `action_head_policy_fn(trainer.action_head, trainer.pfn, n_steps,
+    sample=False)` -- the simple `ActionHead`'s own Beta-mode policy.
+    Everything else here (baseline caching, the paired-improvement stats,
+    figure logging) is genuinely head-architecture-agnostic, so this one
+    seam is enough to reuse the whole callback for a different action-head
+    class entirely (`build_flow_auc_eval_callback` below, for
+    `models.action_head_flow.FlowMatchingActionHead`) instead of
+    duplicating ~90 lines for one different line of policy construction.
     """
     ei_kwargs = ei_kwargs or {}
     baseline_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -127,10 +138,11 @@ def build_auc_eval_callback(
             )
 
         prior = _held_out_prior(x_dim, eval_batch_size, eval_seed, prior_kwargs)
-        rollout = rollout_episode(
-            prior, n_init, n_steps,
-            policy_fn=action_head_policy_fn(trainer.action_head, trainer.pfn, n_steps, sample=False),
-        )
+        if policy_fn_builder is not None:
+            action_policy_fn = policy_fn_builder(trainer)
+        else:
+            action_policy_fn = action_head_policy_fn(trainer.action_head, trainer.pfn, n_steps, sample=False)
+        rollout = rollout_episode(prior, n_init, n_steps, policy_fn=action_policy_fn)
         y = rollout["y_context"][:, n_init:]
         auc_action_head = log_incumbent_auc(y)  # [eval_batch_size]
         curve_action_head = torch.log(incumbent_trajectory(y).clamp_min(1e-12)).mean(dim=0)
@@ -183,6 +195,34 @@ def build_auc_eval_callback(
         return metrics
 
     return Callback(name="", fn=probe, every_n_steps=every_n_steps)
+
+
+def build_flow_auc_eval_callback(
+    x_dim: int, n_init: int, n_steps: int, num_sample_steps: int = 10, **kwargs,
+) -> Callback:
+    """`build_auc_eval_callback`, specialized to
+    `models.action_head_flow.FlowMatchingActionHead`
+    (`trainer.action_head_flow_trainer.ActionHeadFlowTrainer`) via that
+    callback's `policy_fn_builder` seam -- same north-star `auc/*`/
+    `auc_improvement_vs_random/*` metrics and comparison figure, same
+    random/EI baselines, the ONLY difference is which policy generates the
+    "action_head" rollout (`flow_action_head_policy_fn`'s sampled chunk's
+    first point, instead of `action_head_policy_fn`'s Beta mode). This is
+    the callback that makes an apples-to-apples comparison between the two
+    trainers possible (`docs/MILESTONES.md`'s prioritized experiment 4) --
+    same held-out protocol, same metric names, so `auc/action_head` from a
+    flow-trainer run and a simple-trainer run are directly comparable.
+    `**kwargs` forwarded to `build_auc_eval_callback` unchanged
+    (`eval_batch_size`, `eval_seed`, `ei_kwargs`, `n_random_restarts`,
+    `n_ei_restarts`, `log_figure`, `every_n_steps`)."""
+    from anytimeacquisition.models.action_head_flow import flow_action_head_policy_fn
+
+    def policy_fn_builder(trainer: Any):
+        return flow_action_head_policy_fn(trainer.action_head, trainer.pfn, n_steps, num_sample_steps)
+
+    return build_auc_eval_callback(
+        x_dim=x_dim, n_init=n_init, n_steps=n_steps, policy_fn_builder=policy_fn_builder, **kwargs,
+    )
 
 
 def _build_held_out_examples(trainer: Any, n_init: int, n_steps: int, eval_seed: int, batch_size: int,
