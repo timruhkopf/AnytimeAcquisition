@@ -508,17 +508,32 @@ see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`**
   describes — either way, trust the checkpoint's own logged history over
   the config comment). Not a smoke checkpoint after all.
   - `x_dim=1`, 10 shared environments, 12 steps: PFN+EI **beats** both GP+EI
-    and random (mean log-incumbent AUC `-21.70` vs GP's `-19.90`, random's
-    `-20.29`; gap `-1.80`).
+    and random on raw log-incumbent AUC (`-21.70` vs GP's `-19.90`,
+    random's `-20.29`; gap `-1.80`).
   - `x_dim=2`, same setup: PFN+EI **beats** GP+EI and random again
     (`-15.35` vs GP's `-15.06`, random's `-14.58`; gap `-0.29`, smaller than
     at `x_dim=1`).
-  - Both gaps are small relative to the standard errors (`n=10` environments
-    per dimension) — a real, consistent-direction signal (PFN+EI is not
-    losing at either tested dimension, unlike the earlier, incorrect
-    500-step reading), but `n=10` is still thin. Widen `BATCH_SIZE` and/or
-    average over multiple `task_seed`s before treating the exact gap size
-    as final.
+  - **2026-09-08, user-caught methodology gap:** raw log-incumbent AUC
+    isn't directly comparable across environments — `BNNPrior.evaluate()`'s
+    `[0,1]` bound is a *family-pooled* calibration (`_fit_ecdf`, fit once
+    across ~50 architecture draws), not per-instance, so individual draws
+    still differ a lot in their achievable range within `[0,1]`; a raw-scale
+    mean lets wide-range ("easy") environments dominate. Standard BO
+    practice for aggregating across heterogeneous benchmark instances is
+    *normalized regret* — here, per-instance empirical-percentile
+    normalization against a dense per-environment reference (reusing M1's
+    own `build_ecdf`/`percentile`, not a new formula), giving a `[0,1]`
+    "fraction of that environment's own achievable range beaten" score.
+    Re-measured this way, the result is the **same direction, and now with
+    standard errors comparable to (not swamping) the gap size**: `x_dim=1`
+    normalized score `0.890` (PFN) vs `0.827` (GP) vs `0.868` (random), gap
+    `+0.062` (se ≈0.03-0.05); `x_dim=2`: `0.877` (PFN) vs `0.857` (GP) vs
+    `0.839` (random), gap `+0.020` (se ≈0.02-0.04, closer to the noise
+    floor at this dimension). PFN+EI is not losing at either tested
+    dimension, and this reading is now more trustworthy than the raw-scale
+    one — but `n=10` environments is still thin, especially for the
+    `x_dim=2` gap. Widen `BATCH_SIZE` and/or average over multiple
+    `task_seed`s before treating the exact gap size as final.
   - Individual per-environment incumbent curves (not just the mean) are
     plotted in the notebook — worth checking directly rather than only the
     summary numbers, since a mean alone can hide a policy that's a mix of
