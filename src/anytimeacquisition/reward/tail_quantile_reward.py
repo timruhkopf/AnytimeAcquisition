@@ -183,12 +183,32 @@ def build_ecdf(prior: BNNPrior, n_samples: int = 100_000, seed: int | None = Non
 
 def percentile(y_sorted: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Per-instance rank of `v` within `y_sorted` (e.g. from `build_ecdf`),
-    as a fraction in [0, 1]. y_sorted: [B, N] ascending. v: [B] or [B, ...]
-    (broadcasts over any trailing dims) -> same shape as `v`."""
+    as a fraction in [0, 1] -- a plain CDF value (fraction of the reference
+    AT OR BELOW `v`), so it's naturally LOW for a good (small) `v` under
+    this project's minimize convention. `g_from_percentile` expects the
+    OPPOSITE direction (high input = good) -- see `g_reward_minimize` below,
+    which applies that flip; don't feed this function's output into
+    `g_from_percentile` directly (see that mistake's fallout in
+    `docs/ROADMAP.md` §M1/§M3's session notes). y_sorted: [B, N] ascending.
+    v: [B] or [B, ...] (broadcasts over any trailing dims) -> same shape as `v`."""
     v_shape = v.shape
     idx = torch.searchsorted(y_sorted, v.reshape(v_shape[0], -1).contiguous())
     idx = idx.clamp(0, y_sorted.shape[1] - 1)
     return (idx.float() / (y_sorted.shape[1] - 1)).reshape(v_shape)
+
+
+def g_reward_minimize(y_sorted: torch.Tensor, v: torch.Tensor, max_score: float = 4.0) -> torch.Tensor:
+    """The actual `g`-reward for a value `v` under this project's minimize
+    convention (small `v` is good) -- `percentile(y_sorted, v)` is a plain
+    CDF (high for a *large* `v`), so this flips it (`1 - percentile`, the
+    fraction of the reference *worse than* `v`) before `g_from_percentile`.
+    Use this rather than composing `percentile` + `g_from_percentile`
+    directly -- that composition silently computes the reward for
+    *maximizing* `v` instead, the exact bug this function exists to make
+    impossible to repeat. y_sorted: [B, N] ascending. v: [B] or [B, ...]
+    -> same shape as `v`."""
+    tail_u = 1.0 - percentile(y_sorted, v)
+    return torch.from_numpy(g_from_percentile(tail_u.numpy(), max_score=max_score)).to(v.dtype)
 
 
 def normalized_advantage(
@@ -241,13 +261,13 @@ if __name__ == "__main__":
     rollout = rollout_episode(prior, n_init=n_init, n_steps=n_steps, policy_fn=policy_fn, reset=False)
     y_context = rollout["y_context"]  # [B, n_init+n_steps]
 
-    incumbent = torch.cummax(y_context, dim=1).values  # [B, T]
-    u = percentile(y_sorted, incumbent)  # [B, T]
-    g = torch.as_tensor(g_from_percentile(u.numpy(), max_score=4.0))  # [B, T], running incumbent's own reward
+    incumbent = torch.cummin(y_context, dim=1).values  # [B, T], minimize convention
+    tail_u = 1.0 - percentile(y_sorted, incumbent)  # [B, T], direction clip_bind_rate/g_from_percentile expect
+    g = g_reward_minimize(y_sorted, incumbent, max_score=4.0)  # [B, T], running incumbent's own reward
     t = torch.arange(1, g.shape[1] + 1, dtype=g.dtype)
     g_bar = torch.cumsum(g, dim=1) / t  # [B, T], Ḡ_t = running mean reward through step t
 
     advantage, mask = normalized_advantage(g_bar[:, 1:], g[:, :-1])
-    print(f"clip-bind rate on EI trajectories:      {clip_bind_rate(u):.4f}")
+    print(f"clip-bind rate on EI trajectories:      {clip_bind_rate(tail_u):.4f}")
     print(f"advantage-mask rate (g_prev saturated):  {(~mask).float().mean().item():.4f}")
     print(f"mean final incumbent g-reward:           {g[:, -1].mean().item():.4f}")

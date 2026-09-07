@@ -377,9 +377,9 @@ Each milestone has an explicit **exit criterion**. Do not start the next
 milestone until it is met.
 
 - [x] M0 — Kill test (GO / NO-GO) — see `notebooks/m0_kill_test.ipynb`
-- [x] M1 — Environment + reward — clip-bind rate 0.236, see `reward/tail_quantile_reward.py`
+- [x] M1 — Environment + reward — clip-bind rate 0.333 (corrected), see `reward/tail_quantile_reward.py`
 - [x] M2 — Frozen surrogate harness + prior sanity check — PFN+EI beats GP+EI at both x_dim 1 & 2 (n=10 envs each), see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`
-- [ ] M3 — Exact-DP oracle harness
+- [x] M3 — Exact-DP oracle harness — verified against independent brute-force, see `notebooks/m3_discrete_dp_oracle.ipynb`
 - [ ] M4 — Q-head + warm start
 - [ ] M5 — Branching data generation + core training loop
 - [ ] M6 — Stability machinery
@@ -441,13 +441,27 @@ Deliverables:
   produce identical reward trajectories for the same query sequence. Assert in a
   test. ✅ `test_reward_is_scale_invariant_under_monotone_rescaling`.
 - Clip-bind rate measured on EI trajectories. Record it — it decides M8.
-  ✅ **0.236** (23.6%), 8 fresh 2-D BNN draws, 15-step `gp_acquisition_policy(EI)`
+  ✅ **0.333** (33.3%; corrected 2026-09-08, was 0.236 — see the sign-convention
+  bug note below), 8 fresh 2-D BNN draws, 15-step `gp_acquisition_policy(EI)`
   rollout, `n_samples=100_000` Sobol reference (`python -m
   anytimeacquisition.reward.tail_quantile_reward`, seeds fixed — rerun for an
   exact reproduction, this is one seed's reading, not yet averaged over many).
   Non-trivial (neither ~0 nor ~1) — worth a wider seed sweep before trusting it
   as *the* number M8 gates on, but doesn't yet argue either way for
   reinstating the GPD tail.
+  ⚠️ **Sign-convention bug (caught 2026-09-08 while building M3):**
+  `percentile()` is a plain CDF (high for a *large* value), but this project
+  minimizes throughout — this demo had been composing `percentile()`
+  straight into `g_from_percentile()` (and tracking the incumbent via
+  `cummax`), which silently computes the reward for *maximizing* the
+  observed value instead of minimizing it, while rolling out an actually-
+  minimizing EI policy. Fixed via a new canonical `g_reward_minimize`
+  function (`reward/tail_quantile_reward.py`) that always applies the
+  correct flip — use it instead of composing `percentile`+`g_from_percentile`
+  by hand. The 0.236 reading above was measuring the wrong direction; 0.333
+  is the corrected one. (`notebooks/m0_kill_test.ipynb` is unaffected — it's
+  self-consistently framed as maximize throughout, with no minimize-convention
+  machinery involved.)
 - No `nan` reachable anywhere in the reward path (property test with adversarial
   inputs). ✅ Found and fixed the exact `_gpd_survival` bug §2.3 predicted (no
   guard existed yet); `test_gpd_survival_handles_past_the_finite_endpoint_without_nan`,
@@ -552,14 +566,57 @@ see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`**
 
 **The only place correctness can be verified rather than merely measured.**
 
-`src/anytimeacquisition/oracle/discrete_dp.py` (new group)
-- `d ≤ 2`, grid `k=16` ⇒ 256 actions.
+`src/anytimeacquisition/oracle/discrete_dp.py` (new group) — **done 2026-09-08**
+- `d ≤ 2`, grid `k=16` ⇒ 256 actions (`build_action_grid`).
 - Exact optimal policy and `Q*` by backward dynamic programming over the belief,
   under the same `g` reward and the same budget-conditioned AUC objective.
+  **"The belief" = the frozen PFN's (M2) own predictive distribution**, not
+  raw ground-truth values — `Q*` is exact relative to what the PFN says the
+  world looks like, the same target `Q*(a|D,m)` the Q-head (M4/M5) is meant
+  to approximate, computed exactly instead of via approximate rollouts.
+  Continuous outcomes are discretized into `n_outcome_bins` representative
+  values (`discretize_outcomes`, pooling groups of the PFN's native bins)
+  to keep the state space finite — a separate tractability knob from `k`.
+- **Cost is genuinely exponential in `budget`**, not just slow: every
+  remaining step multiplies states-to-evaluate by `(k^d * n_outcome_bins)`.
+  Measured: `d=1` (16 actions) solves `budget=3` in <1s; `d=2` (256
+  actions) solves `budget=2` in ~3s; `d=1/budget=4` and `d=2/budget=3` both
+  exceeded a 120s timeout at `n_outcome_bins=6`/`4`. This is inherent to
+  exact enumeration (confirmed, not assumed) — treat M3 as a periodic
+  correctness *check* at small `budget`, not something run at scale.
+  `_solve_batched` batches the whole frontier through one `PFNSurrogate.predict()`
+  call per remaining-budget level (not one call per state) to make even
+  this much tractable; chunked (`_CHUNK_SIZE`) for memory safety as the
+  frontier grows.
 
-**Exit criterion:** for a fixed seed set, `Q*` is computed and cached, and the
-harness can score any candidate learned `Q` by rank correlation and by regret
-against the DP-optimal policy.
+**Exit criterion — met 2026-09-08, see `notebooks/m3_discrete_dp_oracle.ipynb`,
+`tests/test_discrete_dp.py`**
+- For a fixed seed set, `Q*` is computed and cached, and the harness can
+  score any candidate learned `Q` by rank correlation and by regret against
+  the DP-optimal policy. ✅ `DiscreteDPOracle.solve` + `score_candidate_q`.
+  No caching layer yet (each call recomputes) — add one if repeated M4/M5
+  evaluation makes recomputation the bottleneck, not before. Exercised
+  against EI (myopic, 1-step) as a stand-in candidate `Q` since M4's real
+  Q-head doesn't exist yet: on one example 1-D state, EI came out
+  *negatively* rank-correlated with the 3-step `Q*` (ρ=-0.33) and lost to a
+  single random draw on regret — plausible given M0's own finding that the
+  AUC-normalized objective is more exploitative than a myopic one predicts,
+  but it's one state/seed, not a systematic claim; worth a proper sweep
+  before trusting the direction, let alone the magnitude.
+- **Correctness itself, not just "doesn't crash":** `oracle.solve` is
+  cross-checked in `tests/test_discrete_dp.py` against a from-scratch,
+  unbatched brute-force reimplementation of the same recursion (written
+  independently, not sharing code with the vectorized version) at
+  `budget=1` and `budget=2` — the actual point of this milestone.
+  `score_candidate_q`'s own math (rank correlation, regret) is separately
+  checked against hand-computed expected values.
+
+⚠️ **Sign-convention bug caught while building this** (see §M1's exit
+criterion above for the fuller writeup): composing `percentile()` +
+`g_from_percentile()` directly silently rewards *maximizing* the observed
+value, not minimizing it. A tiny, clearly-wrong `Q*` in this module's first
+draft is what surfaced it. Fixed via `g_reward_minimize`
+(`reward/tail_quantile_reward.py`) — use that, not the raw composition.
 
 This exists so that later milestones cannot be fooled by a plausible-looking loss
 curve.

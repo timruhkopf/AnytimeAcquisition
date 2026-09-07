@@ -11,6 +11,7 @@ from anytimeacquisition.reward.tail_quantile_reward import (
     clipped_empirical_reward,
     fit_gpd_tail,
     g_from_percentile,
+    g_reward_minimize,
     normalized_advantage,
     percentile,
     unclipped_gpd_reward,
@@ -109,3 +110,29 @@ def test_g_from_percentile_matches_clipped_empirical_reward():
     u = np.searchsorted(samples, f_t, side="right") / len(samples)
     via_percentile = g_from_percentile(np.array([u]), max_score=4.0)[0]
     assert abs(via_samples - via_percentile) < 1e-3
+
+
+def test_g_reward_minimize_rewards_small_values_not_large_ones():
+    """The bug this function exists to make impossible to repeat (caught
+    2026-09-08 while building M3): composing percentile() + g_from_percentile()
+    directly silently computes the reward for *maximizing* v, since
+    percentile() is a plain CDF (high for a large v). g_reward_minimize
+    must reward SMALL v instead, matching this project's minimize
+    convention throughout (priors/bnn.py, search/, gp_acquisition.py, ...)."""
+    y_sorted = torch.linspace(0.0, 1.0, 1_000_000).unsqueeze(0)
+    small_v = torch.tensor([[1e-4]])  # ~0.01st percentile -> g ~= clip(-log10(1e-4),0,4)/4 = 1.0
+    large_v = torch.tensor([[0.99]])  # near the top -- should score poorly
+
+    g_small = g_reward_minimize(y_sorted, small_v)
+    g_large = g_reward_minimize(y_sorted, large_v)
+    assert g_small.item() > g_large.item()
+    assert g_small.item() > 0.9  # near the 0.01st percentile -> near-maximal (4-decade-clipped) reward
+
+
+def test_g_reward_minimize_matches_manual_flip_of_percentile():
+    y_sorted = torch.sort(torch.rand(1, 5000)).values
+    v = torch.rand(1, 7)
+
+    expected = g_from_percentile((1.0 - percentile(y_sorted, v)).numpy(), max_score=4.0)
+    actual = g_reward_minimize(y_sorted, v).numpy()
+    assert np.allclose(actual, expected)
