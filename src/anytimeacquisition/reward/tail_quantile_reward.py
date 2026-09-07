@@ -36,6 +36,18 @@ import numpy as np
 from scipy.stats import genpareto
 
 
+def g_from_percentile(u, max_score=4.0):
+    """
+    0. THE REWARD AS A FUNCTION OF AN ALREADY-KNOWN PERCENTILE (M0)
+    Same clipped log-tail transform as `clipped_empirical_reward`, but takes
+    the ECDF value u = F(f_t) directly (e.g. a rank computed once against a
+    per-function reference grid) instead of re-deriving it from raw samples
+    every call. Vectorized: u may be a numpy array.
+    """
+    tail_prob = np.clip(1.0 - np.asarray(u), 10**-max_score, 1.0)
+    return np.clip(-np.log10(tail_prob), 0, max_score) / max_score
+
+
 def clipped_empirical_reward(f_t, samples, max_score=4.0):
     """
     1. THE ORIGINAL CLIPPED REWARD (v1)

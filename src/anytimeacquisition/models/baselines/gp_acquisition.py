@@ -11,7 +11,7 @@ functions are built to *maximize*. `fit_gp` fits on `-y_context`
 internally so "improvement"/"best_f" mean the same thing BoTorch expects,
 and `gp_acquisition_policy` never leaks that sign flip to its caller (its
 inputs and outputs are both in this project's normal minimize/`[0,1]`
-convention, matching `trainer.exit_rollout.random_policy`'s signature
+convention, matching `metrics.rollout.random_policy`'s signature
 exactly, so any of these can be dropped straight into `rollout_episode`'s
 `policy_fn`).
 
@@ -71,7 +71,7 @@ def gp_acquisition_policy(
     x_context: torch.Tensor, y_context: torch.Tensor, x_dim: int,
     acquisition: str = "EI", num_restarts: int = 10, raw_samples: int = 256, mes_candidate_set_size: int = 1000,
 ) -> torch.Tensor:
-    """Same signature/contract as `trainer.exit_rollout.random_policy` --
+    """Same signature/contract as `metrics.rollout.random_policy` --
     drop-in `policy_fn` for `rollout_episode`. x_context: [B, Nt, x_dim]
     y_context: [B, Nt] -> x_next: [B, x_dim].
 
@@ -100,15 +100,15 @@ if __name__ == "__main__":
     """M6.md's required sanity check: each baseline should beat random
     search on a known easy instance -- compares log-incumbent AUC
     (`metrics/inc_auc.py`, already built for exactly this) for every
-    acquisition here against `trainer.exit_rollout.random_policy`, on the
+    acquisition here against `metrics.rollout.random_policy`, on the
     identical rollout setup (same BNNPrior instances, same seed, same
     `rollout_episode` machinery -- any of these policies is a drop-in
     `policy_fn`)."""
     from functools import partial
 
     from anytimeacquisition.metrics.inc_auc import log_incumbent_auc
+    from anytimeacquisition.metrics.rollout import random_policy, rollout_episode
     from anytimeacquisition.priors.bnn import BNNPrior
-    from anytimeacquisition.trainer.exit_rollout import random_policy, rollout_episode
 
     torch.manual_seed(0)
     x_dim = 2

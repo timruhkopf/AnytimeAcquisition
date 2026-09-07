@@ -376,7 +376,7 @@ is a later robustness experiment.
 Each milestone has an explicit **exit criterion**. Do not start the next
 milestone until it is met.
 
-- [ ] M0 — Kill test (GO / NO-GO)
+- [x] M0 — Kill test (GO / NO-GO) — see `notebooks/m0_kill_test.ipynb`
 - [ ] M1 — Environment + reward
 - [ ] M2 — Frozen surrogate harness + prior sanity check
 - [ ] M3 — Exact-DP oracle harness
