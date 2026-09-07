@@ -123,12 +123,34 @@ Context = `D_t`, queries = candidate points, output = bar distribution over `y`.
 the PFN's later layers. Those layers were trained to map query tokens of the form
 `(x, ?)` to a predictive distribution. A token encoding they have never seen is
 out-of-distribution for frozen weights, and the calibration guarantee is lost.
+This is the one hard constraint: **never inject a novel token encoding through
+the PFN's own frozen weights.**
 
 Budget `m` enters the **trainable head only**.
 
-Note: queries attend to context at *every* layer, so there is no intermediate
-depth at which "the belief" is fully formed. **There is no belief vector.** What
-exists is a function `candidate → predictive distribution`.
+**2026-09-08 revision (was over-broad):** an earlier version of this section
+also said "there is no belief vector, don't read intermediate activations,"
+treating that as the same constraint as the injection rule above. It isn't —
+injecting novel tokens into the PFN's *own* attention is what forfeits the
+calibration guarantee; a separate, newly-trained module *reading* the PFN's
+own activations (never writing to them, PFN forward pass untouched) is a
+different operation and isn't covered by that argument. Concretely: `models/pfn.py`'s
+`return_hidden=True` already exposes, as a free byproduct of the same forward
+call used to get the bar-distribution logits, each candidate's own **final**
+per-layer hidden state (pre `out_ln`/`out_head`) — this is the query token
+after cross-attending into the frozen context at every layer, just not yet
+lossily compressed to `n_bins` logits for the y-prediction task. M4's Q-head
+uses this (`h_candidate`) as its primary per-candidate feature — see M4.
+
+What's still an open, evidence-gated question, not a default: reading
+*multiple intermediate* depths with new cross-attention weights (not just the
+final layer) is a stronger version of the same idea, but it's mechanically
+very close to the retired `models/action_head.py`'s own per-layer
+cross-attention into frozen PFN hidden states — a design this project walked
+away from, though for label-quality reasons in the old BC/DAgger training
+scheme, not because that specific mechanism was shown broken. Don't assume it
+transfers just because the training scheme is different now; gate it behind
+an ablation against the final-layer-only version (M4).
 
 ### 1.5 Never collapse the candidate representation to `(μ, σ)`
 
@@ -378,7 +400,7 @@ milestone until it is met.
 
 - [x] M0 — Kill test (GO / NO-GO) — see `notebooks/m0_kill_test.ipynb`
 - [x] M1 — Environment + reward — clip-bind rate 0.333 (corrected), see `reward/tail_quantile_reward.py`
-- [x] M2 — Frozen surrogate harness + prior sanity check — PFN+EI beats GP+EI at both x_dim 1 & 2 (n=10 envs each), see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`
+- [x] M2 — Frozen surrogate harness + prior sanity check — gap recorded; at real power (n=100) GP+EI beats PFN+EI at every tested dim, gap widens with d — see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`
 - [x] M3 — Exact-DP oracle harness — verified against independent brute-force, see `notebooks/m3_discrete_dp_oracle.ipynb`
 - [ ] M4 — Q-head + warm start
 - [ ] M5 — Branching data generation + core training loop
@@ -489,6 +511,12 @@ itself is the bottleneck rather than the policy.
   there (only run on CPU so far, where it's correct but not necessarily
   faster) — check before assuming it helps.
 - API: `PFNSurrogate.predict(x_context, y_context, candidates) -> logits [B,C,n_bins]`.
+  **Known gap, needed by M4 (2026-09-08):** `predict()` calls `pfn(...)`
+  without `return_hidden=True`, so it only exposes final bar-distribution
+  logits, not the per-layer hidden states M4's `h_candidate`/`h_context`
+  features need (§1.4). Extend `PFNSurrogate` (a `return_hidden` flag on
+  `predict()`, or a sibling method) before M4 starts, rather than have M4
+  reach around the wrapper to call `pfn(...)` directly.
 - Intra-step KV caching only (§2.11) — by construction (one batched forward
   call per whole candidate pool; the PFN's train-side attention never sees
   test tokens), no explicit cache object needed. Do not build a cross-step cache.
@@ -521,37 +549,43 @@ see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`**
   or the checkpoint came from a different run than the committed config
   describes — either way, trust the checkpoint's own logged history over
   the config comment). Not a smoke checkpoint after all.
-  - `x_dim=1`, 10 shared environments, 12 steps: PFN+EI **beats** both GP+EI
-    and random on raw log-incumbent AUC (`-21.70` vs GP's `-19.90`,
-    random's `-20.29`; gap `-1.80`).
-  - `x_dim=2`, same setup: PFN+EI **beats** GP+EI and random again
-    (`-15.35` vs GP's `-15.06`, random's `-14.58`; gap `-0.29`, smaller than
-    at `x_dim=1`).
-  - **2026-09-08, user-caught methodology gap:** raw log-incumbent AUC
-    isn't directly comparable across environments — `BNNPrior.evaluate()`'s
-    `[0,1]` bound is a *family-pooled* calibration (`_fit_ecdf`, fit once
-    across ~50 architecture draws), not per-instance, so individual draws
-    still differ a lot in their achievable range within `[0,1]`; a raw-scale
-    mean lets wide-range ("easy") environments dominate. Standard BO
-    practice for aggregating across heterogeneous benchmark instances is
-    *normalized regret* — here, per-instance empirical-percentile
-    normalization against a dense per-environment reference (reusing M1's
-    own `build_ecdf`/`percentile`, not a new formula), giving a `[0,1]`
-    "fraction of that environment's own achievable range beaten" score.
-    Re-measured this way, the result is the **same direction, and now with
-    standard errors comparable to (not swamping) the gap size**: `x_dim=1`
-    normalized score `0.890` (PFN) vs `0.827` (GP) vs `0.868` (random), gap
-    `+0.062` (se ≈0.03-0.05); `x_dim=2`: `0.877` (PFN) vs `0.857` (GP) vs
-    `0.839` (random), gap `+0.020` (se ≈0.02-0.04, closer to the noise
-    floor at this dimension). PFN+EI is not losing at either tested
-    dimension, and this reading is now more trustworthy than the raw-scale
-    one — but `n=10` environments is still thin, especially for the
-    `x_dim=2` gap. Widen `BATCH_SIZE` and/or average over multiple
-    `task_seed`s before treating the exact gap size as final.
-  - Individual per-environment incumbent curves (not just the mean) are
-    plotted in the notebook — worth checking directly rather than only the
-    summary numbers, since a mean alone can hide a policy that's a mix of
-    great and terrible runs averaging out to something plausible-looking.
+  - **2026-09-08, methodology fixed, then rerun at real statistical power —
+    the direction reverses.** Two issues were caught and fixed in sequence:
+    (1) raw log-incumbent AUC isn't comparable across environments —
+    `BNNPrior.evaluate()`'s `[0,1]` bound is a *family-pooled* calibration
+    (`_fit_ecdf`, fit once across ~50 architecture draws), not per-instance,
+    so a raw-scale mean lets wide-range ("easy") environments dominate;
+    fixed via per-instance normalized regret (reusing M1's `build_ecdf`/`percentile`).
+    (2) even normalized, a linear `[0,1]` score compresses exactly the
+    differences that matter once policies cluster near the top — fixed by
+    reporting in **g-reward space** (`g_reward_minimize`, M1's own log-scale
+    tail-quantile transform) instead, which is also the actual metric M4+
+    trains against, not just a plotting choice.
+  - The first (`n=10`) reading said PFN+EI beat GP+EI at both `x_dim=1` and
+    `x_dim=2`. **That didn't hold up at `n=100`.** g-reward score (higher is
+    better), 3 dimensions, `n=100` shared environments each:
+
+    | | `x_dim=1` | `x_dim=2` | `x_dim=6` |
+    |---|---|---|---|
+    | GP+EI | 0.811 ± 0.021 | 0.695 ± 0.021 | 0.516 ± 0.019 |
+    | PFN+EI | 0.770 ± 0.024 | 0.625 ± 0.023 | 0.406 ± 0.016 |
+    | random | 0.633 ± 0.031 | 0.464 ± 0.027 | 0.357 ± 0.011 |
+
+    GP+EI wins clearly at every dimension tested now, standard errors small
+    relative to the gaps. PFN+EI still consistently beats random. **The
+    PFN-vs-GP gap widens with dimension** (−0.041 → −0.070 → −0.110), the
+    opposite of what you'd hope if the PFN's learned prior structure were
+    paying off at higher `d` — two live, non-exclusive explanations, not yet
+    distinguished: genuine surrogate degradation at higher `d` (what
+    `callbacks/dim_validation.py` was built to watch during training), or
+    `pfn_surrogate_ei_policy`'s 256-point Sobol candidate pool being a much
+    sparser cover of a 6-D space than GP+EI's actual continuous multistart
+    optimization — a confound in the *search*, not necessarily the
+    *surrogate*. This notebook alone can't tell those apart.
+  - **Verdict: the surrogate is not yet trustworthy enough to treat M2's gap
+    as closed.** GP+EI is the stronger classical baseline here, consistently,
+    at real statistical power. Individual per-environment incumbent curves
+    (not just the mean) are plotted in the notebook, in g-reward space.
 - Measured cost curve: PFN forward time vs `t` and vs `C`, confirming the
   `O(t(t+C))` attention term and the `O(C)` MLP term. Use it to pick `C`.
   ✅ Measured (`t∈[4,64]` at `C=64`: 4.5→6.8ms; `C∈[16,256]` at `t=16`:
@@ -625,24 +659,70 @@ curve.
 
 ### M4 — Q-head + warm start
 
+**2026-09-08: revised after design discussion — architecture, inputs, and warm
+start all changed from the original draft below.** Not yet implemented; this
+is the settled plan to build against.
+
 `src/anytimeacquisition/models/acquisition/q_head.py` — ~5–10M params, small relative to the frozen backbone
 (§1.2).
 
-Per-candidate inputs:
+**Per-candidate inputs, in priority order (see §1.4 for the reasoning):**
+- `h_candidate` — the candidate's own final-layer pre-projection hidden state
+  (`pfn(..., return_hidden=True)`, the test-token slice of the last layer) —
+  **primary** feature. Free (same forward call already needed for the bar
+  distribution), already cross-attended into the full frozen context at every
+  layer, and — per §1.2 — this is where "the frozen PFN does most of the
+  marginalization work" actually lives, not in a lossy 64-bin projection of it.
+- `h_context` — mean-pooled final-layer **train**-token hidden states (same
+  forward call, same free byproduct) — a learned, permutation-invariant
+  context summary, alongside (not necessarily replacing) the hand-picked
+  scalars below.
 - bar distribution re-binned to 32–64 bins (**never** `(μ,σ)` alone — §1.5)
-- EI, PI at 3–4 thresholds, `μ`, `σ`
 - the candidate `a` itself
-- permutation-invariant context summaries: `g_{t−1}`, `t/B`, count of
-  observations within `ε` of the incumbent, number of distinct improvements
+- permutation-invariant context summaries: `g_{t−1}`, `t/B` — **not**
+  redundant with `h_candidate`/`h_context`: `g_{t−1}` sets the ceiling on how
+  much value *any* candidate can add (§2.6), and the PFN was never trained on
+  any signal related to incumbent quality, so nothing guarantees it's easily
+  recoverable from the hidden state even though it's technically a function
+  of `D_t`. `t/B` is the budget-conditioning signal the whole non-myopic
+  thesis depends on (§1.12) — keep both as explicit inputs, not ablation
+  candidates.
+- count of observations within `ε` of the incumbent, number of distinct
+  improvements — kept from the original draft (§1.3's own named examples),
+  but **lower-priority ablation candidate** now that `h_context` exists as a
+  learned alternative — unlike `g_{t−1}`/`t/B` above, these weren't shown to
+  be non-redundant with the new hidden-state channel, just carried over.
 - budget `m` by **two redundant paths**:
   1. a token with its own encoder over sinusoidal features of `log2(m)`
      (PFNs4BO's style-embedding mechanism)
   2. **adaLN** modulation of the head's blocks (π0.5's mechanism)
   Ablate to determine which carries the work.
 
+**EI, PI at 3–4 thresholds, `μ`, `σ` — demoted from default input to
+ablation-only (default off), 2026-09-08.** These are all deterministic,
+closed-form functions of the *same* re-binned distribution already listed
+above — zero new information, and now that `h_candidate` (a strict superset,
+informationally) is available, the original justification for including them
+anyway (make the EI-imitation warm start trivially reachable) is weaker and
+the failure mode it risks is worse: an easy, informative scalar sitting next
+to a rich vector it's a summary of is exactly the shortcut-learning setup —
+gradient descent settling for "mostly reads the EI feature" instead of
+exploiting `h_candidate` for the actually-new part of the job (multi-step
+value). Enable only if warm start (below) can't reach its exit criterion
+without them, not by default.
+
 Candidates **do not attend to each other** — mirrors the PFN's query mask, keeps
 per-candidate independence (correct for argmax), gives `O(t(t+C))`, and lets `C`
-differ between train and deploy.
+differ between train and deploy. **Architecture default: a small MLP per
+candidate, not a transformer** — the work of relating a candidate to the
+context is already done by the frozen PFN's own cross-attention (that's what
+`h_candidate` *is*); reach for attention inside the head itself only if an
+MLP provably can't extract enough from `h_candidate`/`h_context`, not as a
+starting assumption. No separate policy network exists in this design —
+`argmax_a Q(a)` *is* the policy (§0); a *learned* proposer sharing a
+cross-attention trunk with the Q-head (AlphaGo-Zero-style dual head) is a
+plausible future extension, explicitly **not** in scope here — `proposer.py`
+below stays a fixed, non-learned procedure.
 
 **Output: bar distribution over `Â ∈ [0,1]`**, ~32 bins, cross-entropy loss.
 Take the distribution's **mean** for argmax and for bootstrapping.
@@ -653,15 +733,64 @@ Take the distribution's **mean** for argmax and for bootstrapping.
 3. top-k by EI
 4. gradient ascent on `Q` (differentiable in `a`)
 
-`src/anytimeacquisition/trainer/warm_start.py`
-- Generate EI trajectories, compute returns, regress `Â`.
+`src/anytimeacquisition/trainer/warm_start.py` — **two-phase, 2026-09-08
+revision.** The original draft (generate EI trajectories, compute realized
+returns, regress `Â`) is now Phase B below; a cheaper, exact Phase A precedes it.
+
+- **Phase A — imitate the acquisition function analytically, no environment
+  interaction.** For sampled contexts (prior draws only — never evaluate `f`),
+  score every candidate with `bar_dist.pi()` (closed-form, already in
+  `[0,1]`, no invented unit conversion the way raw `ei()` would need) and
+  train the Q-head against it. Two components, not regression alone:
+  - primary: a **ranking loss** against PI's own ranking — reuses §2.7's
+    listwise-CE machinery (small-weight, high-temperature) rather than
+    inventing a second one; the actual goal here is ranking, not matching an
+    absolute value.
+  - small-weight: direct **PI regression**, for calibration — a ranking-only
+    loss can leave the head's own mean well-*ordered* but not well-calibrated
+    in absolute `Â` terms, and that mean is what M5's bootstrap (`V̄`) reads
+    directly. Pure ranking risks handing M5 a broken bootstrap signal right
+    when `h` is largest and `V̄` is least trustworthy (§1.10).
+  - Dense and exact: every scored candidate is a label, not just the one an
+    EI rollout would have picked, and there's no Monte Carlo noise to
+    average down (unlike Phase B's realized returns).
+  - **Stop Phase A early, not at convergence.** Per AlphaGo's own supervised-then-RL
+    precedent: an over-converged imitation phase produces an
+    over-confident, narrow head that starves Phase B's exploration (the
+    supervised policy there made a *better search prior* than the
+    fully-converged one for exactly this reason). Stop once rank correlation
+    with PI is high but not saturated.
+- **Phase B — switch to realized returns** (the original draft): branch-and-replay
+  rollout labels, per M5. **Anneal, don't switch cold** — `λ_phaseA: 1→0`,
+  `λ_phaseB: 0→1` over a window, not an instant swap; Phase A and Phase B
+  targets don't obviously live on identical scales, and an abrupt swap risks
+  shocking the head's last layers out of the representation Phase A just paid
+  for.
 
 **Exit criterion**
-- Warm-started `Q` reproduces EI's ranking to high rank correlation on held-out
-  states — i.e. it has learned to imitate a known-good policy before being asked
-  to improve on one.
+- **Phase A head reproduces PI's ranking to high rank correlation on
+  held-out states, checked via `oracle.score_candidate_q` (M3)** — same
+  function, EI/PI as the reference instead of the DP-exact `Q*`, no new
+  scoring code needed. This is a genuine architecture test, not just a
+  training-progress check: PI is an exact, deterministic, closed-form
+  target, so if the head can't fit it, something in the architecture is
+  broken, discoverable in about an hour rather than after a week of RL.
+- Full warm-started `Q` (post Phase A → Phase B anneal) still reproduces EI's
+  ranking to high rank correlation on held-out states — i.e. it has learned
+  to imitate a known-good policy before being asked to improve on one.
 - `m`-shuffle test **already passes** at this stage (behavior changes when `m`
   changes) or the conditioning path is broken before RL even starts.
+
+**Ablations this milestone owes (in priority order):**
+1. Two redundant budget-encoding paths (already flagged above).
+2. `h_candidate`/`h_context` (final layer only) vs. also reading 1-2
+   intermediate depths with new cross-attention weights — §1.4's open
+   question; don't add depths without evidence the final layer is
+   insufficient.
+3. EI/PI/`μ`/`σ` on vs. off as explicit inputs, now that `h_candidate` makes
+   them informationally redundant — does Phase A actually need the crutch?
+4. Count-near-incumbent/distinct-improvements vs. relying on `h_context`
+   alone for context summarization.
 
 ---
 
@@ -694,6 +823,23 @@ V̄(s_{t+h}) = g_{t+h−1} + Â_θ(s_{t+h}) · (1 − g_{t+h−1})
 ```
 
 `h` schedule per §1.10: `B` → `8` → `{1,3}`, annealing **down**.
+
+**Cost accounting (2026-09-08, added — branching is cheaper than it looks):**
+a branch point's context encoding is **one** batched PFN forward, shared by
+all `K` proposed children (matches §2.11's intra-step-only caching — this is
+the same "encode once, score the whole candidate pool in one call" trick M2's
+`PFNSurrogate`/M3's `DiscreteDPOracle` already rely on). Only the
+*continuations* need fresh per-step forwards, since no cache survives across
+steps. So `K` labels cost `1 + K·h` forwards, not `K·(t+h)` — and at `h=1`
+(the phase that matters most, since that's most of training once `h`
+anneals down) that's `1 + K`, cheap enough that **the prefix (`t` forwards to
+reach the branch point) typically dominates the branch's own cost**, not the
+other way around. Practical consequence: the right lever for cost is placing
+*more branch points per trajectory* (already the plan — `m` log-uniform, not
+`t`, §4.5), not shrinking `K`. `h=1` bootstrap concretely:
+`Ḡ ≈ [g(max(incumbent, f(a))) + (m−1)·V̄(D_t ∪ {(a,f(a))})] / m` — needs a
+trustworthy `V̄`, which is exactly why `h=1` only becomes the common case
+*after* `h` has annealed down (§1.10), not from the start.
 
 **Exit criterion**
 - Phase 1 (`h = B`, pure Monte Carlo) trains stably with no bootstrap.
