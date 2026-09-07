@@ -3,22 +3,13 @@ not a GP (see `gp_acquisition.py` for that baseline; this is a *different*
 surrogate, both explicitly named in `docs/ROADMAP.md` Phase 5: "a classical
 acquisition function (EI/UCB) run on the same frozen PFN's own PPD").
 
-`expected_improvement`'s closed form is **adapted, not derived from
-scratch**, from the actual PFNs4BO reference implementation vendored in
-this repo at `archive/src/utils/bar_distribution.py::BarDistribution.ei()`
-(lines 135-149) -- `models/bar_distribution.py`'s own docstring already
-notes that PFNs4BO's EI/PI/UCB machinery was deliberately dropped during
-that port ("belongs to M6's classical baselines instead, not the PFN's own
-output head"). That reference method assumes **maximization**
-(`assert maximize`); this project minimizes throughout (`priors/bnn.py`,
-`search/exploit.py`, `search/explore.py`, `gp_acquisition.py`'s own
-sign-flip note), so the per-bucket clamping trick below is the same one,
-algebraically mirrored for minimization (swap which border plays the
-"active" role: the reference's `borders[1:]` becomes `borders[:-1]` here).
-Checked by hand against the reference's own three cases (`best_f`
-below/inside/above a bucket) and, more importantly, cross-checked
-numerically against a Monte Carlo estimate in
-`tests/test_pfn_acquisition.py` -- not trusted on the algebra alone.
+The closed-form EI/PI formulas themselves live on `BarDistribution`
+(`.ei()`/`.pi()`) as of 2026-09-08 -- ported there from PFNs4BO's own
+`archive/src/utils/bar_distribution.py::BarDistribution.ei()`/`.pi()`,
+algebraically mirrored for this project's minimize convention (see
+`bar_distribution.py`'s own docstrings for the exact mirroring and the
+Monte Carlo cross-check). This module now only holds `pfn_ei_argmax`'s
+dense-grid search.
 
 `pfn_ei_argmax` is deliberately **not** an optimizer: it evaluates a dense
 `torch.linspace` grid in one batched PFN forward call and takes the argmax.
@@ -40,26 +31,6 @@ from anytimeacquisition.models.bar_distribution import BarDistribution
 from anytimeacquisition.models.pfn import PFN
 
 
-def expected_improvement(bar_dist: BarDistribution, logits: torch.Tensor, incumbent: torch.Tensor) -> torch.Tensor:
-    """Closed-form `E[max(incumbent - Y, 0)]` under the piecewise-uniform
-    bar density, no Monte Carlo (matches `BarDistribution.entropy()`'s own
-    discipline). logits: [..., n_bins]  incumbent: broadcastable to
-    `logits.shape[:-1]` (e.g. [B] for logits [B,n_bins], or [B,1] for
-    logits [B,N,n_bins]) -> [...] (logits.shape[:-1]).
-
-    Per-bucket contribution, for bucket [lo,hi) with probability mass p_i:
-    `p_i * (incumbent*(clamped-lo) - (clamped**2-lo**2)/2) / (hi-lo)`,
-    `clamped = incumbent.clamp(lo, hi)` -- one expression covering all three
-    cases (incumbent below/inside/above the bucket) via clamping, mirroring
-    the reference's own trick (see module docstring)."""
-    lo, hi = bar_dist.borders[:-1], bar_dist.borders[1:]
-    inc = incumbent.unsqueeze(-1)  # [..., 1], broadcasts against the n_bins axis
-    clamped = inc.clamp(lo, hi)  # [..., n_bins]
-    bucket_contributions = (inc * (clamped - lo) - (clamped**2 - lo**2) / 2) / bar_dist.bucket_widths
-    p = torch.softmax(logits, -1)
-    return (p * bucket_contributions).sum(-1)
-
-
 def pfn_ei_argmax(
     pfn: PFN, bar_dist: BarDistribution, x_train: torch.Tensor, y_train: torch.Tensor, n_grid: int = 1000,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -78,7 +49,7 @@ def pfn_ei_argmax(
     with torch.no_grad():
         logits = pfn(x_train, y_train, grid_batched)  # [B, n_grid, n_bins]
     incumbent = y_train.min(dim=1).values  # [B]
-    ei_grid = expected_improvement(bar_dist, logits, incumbent.view(B, 1))  # [B, n_grid]
+    ei_grid = bar_dist.ei(logits, incumbent.view(B, 1))  # [B, n_grid]
     best_idx = ei_grid.argmax(dim=1)
     x_star = grid_batched[torch.arange(B), best_idx]
     return x_star, grid, ei_grid

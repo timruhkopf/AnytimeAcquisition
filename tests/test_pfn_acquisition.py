@@ -1,13 +1,15 @@
 import torch
 
-from anytimeacquisition.models.bar_distribution import BarDistribution, uniform_bin_borders
 from anytimeacquisition.models.baselines.pfn_acquisition import (
-    expected_improvement,
     pfn_acquisition_policy,
     pfn_ei_argmax,
 )
 from anytimeacquisition.models.pfn import PFN
 from anytimeacquisition.priors.bnn import BNNPrior
+
+# EI's closed form itself now lives on BarDistribution.ei() and is tested in
+# tests/test_bar_distribution.py; these tests cover pfn_ei_argmax's grid
+# search and pfn_acquisition_policy's rollout_episode contract only.
 
 
 def _tiny_pfn(x_dim=1, seed=0):
@@ -15,53 +17,6 @@ def _tiny_pfn(x_dim=1, seed=0):
     pfn = PFN(max_x_dim=x_dim, d_model=16, n_heads=2, n_layers=2, d_ff=32, n_bins=16)
     pfn.eval()
     return pfn, pfn.bar_dist
-
-
-def test_expected_improvement_matches_monte_carlo():
-    """Closed-form EI vs. a brute-force Monte Carlo estimate -- the key
-    correctness check for the formula adapted (not derived from scratch,
-    see module docstring) from PFNs4BO's `archive/src/utils/
-    bar_distribution.py::BarDistribution.ei()`. Sample from the
-    piecewise-uniform density directly (multinomial bucket choice +
-    uniform-within-bucket), not via the PFN -- isolates the formula itself
-    from any PFN behavior."""
-    torch.manual_seed(0)
-    bar_dist = BarDistribution(uniform_bin_borders(n_bins=32))
-    logits = torch.randn(5, 32) * 2.0
-    incumbent = torch.rand(5)
-
-    closed_form = expected_improvement(bar_dist, logits, incumbent)
-
-    n_samples = 200_000
-    p = torch.softmax(logits, -1)
-    bucket_idx = torch.multinomial(p, n_samples, replacement=True)  # [5, n_samples]
-    lo = bar_dist.borders[:-1][bucket_idx]
-    hi = bar_dist.borders[1:][bucket_idx]
-    y_samples = lo + (hi - lo) * torch.rand(5, n_samples)
-    monte_carlo = (incumbent.unsqueeze(-1) - y_samples).clamp_min(0.0).mean(dim=-1)
-
-    assert torch.allclose(closed_form, monte_carlo, atol=0.01), (closed_form, monte_carlo)
-
-
-def test_expected_improvement_zero_when_incumbent_below_support():
-    """No y in [0,1] can improve on an incumbent already below every bin ->
-    EI must be exactly 0 everywhere."""
-    bar_dist = BarDistribution(uniform_bin_borders(n_bins=16))
-    logits = torch.randn(3, 16)
-    incumbent = torch.full((3,), -1.0)  # below borders[0] == 0.0
-    ei = expected_improvement(bar_dist, logits, incumbent)
-    assert torch.allclose(ei, torch.zeros(3))
-
-
-def test_expected_improvement_equals_incumbent_minus_mean_when_above_support():
-    """When the incumbent is above every bin, every y improves on it by
-    exactly (incumbent - y) -- EI collapses to incumbent - E[Y]."""
-    bar_dist = BarDistribution(uniform_bin_borders(n_bins=16))
-    logits = torch.randn(3, 16)
-    incumbent = torch.full((3,), 2.0)  # above borders[-1] == 1.0
-    ei = expected_improvement(bar_dist, logits, incumbent)
-    expected = incumbent - bar_dist.mean(logits)
-    assert torch.allclose(ei, expected, atol=1e-5)
 
 
 def test_pfn_ei_argmax_shapes_and_self_consistency():

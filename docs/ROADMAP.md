@@ -378,7 +378,7 @@ milestone until it is met.
 
 - [x] M0 — Kill test (GO / NO-GO) — see `notebooks/m0_kill_test.ipynb`
 - [x] M1 — Environment + reward — clip-bind rate 0.236, see `reward/tail_quantile_reward.py`
-- [x] M2 — Frozen surrogate harness + prior sanity check — preliminary/smoke-checkpoint reading, see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`
+- [x] M2 — Frozen surrogate harness + prior sanity check — PFN+EI beats GP+EI at both x_dim 1 & 2 (n=10 envs each), see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`
 - [ ] M3 — Exact-DP oracle harness
 - [ ] M4 — Q-head + warm start
 - [ ] M5 — Branching data generation + core training loop
@@ -478,36 +478,51 @@ itself is the bottleneck rather than the policy.
 - Intra-step KV caching only (§2.11) — by construction (one batched forward
   call per whole candidate pool; the PFN's train-side attention never sees
   test tokens), no explicit cache object needed. Do not build a cross-step cache.
-- Derived scalars: `expected_improvement` (reused from
-  `models/baselines/pfn_acquisition.py`, already existed) + new
-  `probability_of_improvement`, both closed-form off the bar distribution's
-  logits, plus `mean_std` (`BarDistribution.mean`/`.variance`, already
-  existed). **Correction to this bullet's original wording:** `BarDistribution`
-  itself does *not* have EI/PI built in — its own docstring says this was
-  deliberately dropped during the PFNs4BO port ("belongs to M6's [now M7's]
-  classical baselines instead, not the PFN's own output head"), so these live
-  in `pfn_surrogate.py`/`pfn_acquisition.py` instead, not on `BarDistribution`.
+- Derived scalars: `PFNSurrogate.expected_improvement`/`.probability_of_improvement`/
+  `.mean_std` call straight through to `BarDistribution.ei`/`.pi`/`.mean`/`.variance`.
+  **2026-09-08 correction/reversal of this bullet's original wording, by user
+  request:** `ei`/`pi` (plus `quantile`/`ucb`, not originally in this bullet
+  at all) are now ported directly onto `BarDistribution` itself, from the
+  vendored PFNs4BO reference (`archive/src/utils/bar_distribution.py`),
+  mirrored for this project's minimize convention — reversing the earlier
+  "deliberately dropped, belongs to the classical baselines instead"
+  decision. The old standalone `expected_improvement`/`probability_of_improvement`
+  functions in `pfn_acquisition.py`/`pfn_surrogate.py` are gone; every call
+  site now calls `bar_dist.ei(...)`/`.pi(...)` directly. See
+  `bar_distribution.py`'s own docstring for what was and wasn't ported
+  (`smoothing`/`mean_prediction_logits` and `FullSupportBarDistribution`'s
+  half-normal tail extrapolation were not — this project uses fixed `[0,1]`
+  borders, not full support).
 
-**Exit criterion (this is the risk gate for §2.12) — preliminary reading 2026-09-07,
+**Exit criterion (this is the risk gate for §2.12) — reading updated 2026-09-08,
 see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`**
 - Standalone BO with this pfn surrogate + EI, benchmarked against a Botorch GP + EI
   model on a shared task set. **Record the gap.**
-  ⚠️ Done, but on `pfn_variable_xdim_smoke.pt` — a 500-step, explicitly
-  "not a serious training run" checkpoint (its own experiment config's
-  comment) — so treat this as a pipeline check, not the real gate decision:
-  - `x_dim=1`, 20 shared tasks, 12 steps: PFN+EI **beats** GP+EI (mean
-    log-incumbent AUC `-31.53` vs `-24.51`, gap `-7.02`) — but with a large
-    standard error (`±10.6` vs GP's `±5.1`), so this could be a few lucky
-    trajectories, not a reliable win.
-  - `x_dim=2`, same setup: PFN+EI **loses** to both GP+EI and random search
-    (`-19.62` vs GP's `-21.77`, gap `+2.15`) — plausible given the
-    checkpoint's variable-dim training barely ran and dimensionality is
-    exactly where `callbacks/dim_validation.py` was added to watch for
-    degradation.
-  - **Re-run this notebook on a properly trained checkpoint before treating
-    either result as real** — right now it mainly confirms the comparison
-    pipeline (shared tasks, both policies' conventions, AUC scoring) is
-    correctly wired, not that the surrogate is or isn't trustworthy yet.
+  ⚠️ **Checkpoint correction (2026-09-08, user-caught):** `pfn_variable_xdim_smoke.pt`'s
+  experiment config comment claims "500 steps, not a serious training run" —
+  that comment is **stale**. The checkpoint's own logged `history['step']`
+  shows it actually trained for **29,999 steps** (301 logged points,
+  `log_every=50`... doesn't reconcile exactly with the config's `n_steps:
+  500`, so the config was edited/reused after this checkpoint was produced,
+  or the checkpoint came from a different run than the committed config
+  describes — either way, trust the checkpoint's own logged history over
+  the config comment). Not a smoke checkpoint after all.
+  - `x_dim=1`, 10 shared environments, 12 steps: PFN+EI **beats** both GP+EI
+    and random (mean log-incumbent AUC `-21.70` vs GP's `-19.90`, random's
+    `-20.29`; gap `-1.80`).
+  - `x_dim=2`, same setup: PFN+EI **beats** GP+EI and random again
+    (`-15.35` vs GP's `-15.06`, random's `-14.58`; gap `-0.29`, smaller than
+    at `x_dim=1`).
+  - Both gaps are small relative to the standard errors (`n=10` environments
+    per dimension) — a real, consistent-direction signal (PFN+EI is not
+    losing at either tested dimension, unlike the earlier, incorrect
+    500-step reading), but `n=10` is still thin. Widen `BATCH_SIZE` and/or
+    average over multiple `task_seed`s before treating the exact gap size
+    as final.
+  - Individual per-environment incumbent curves (not just the mean) are
+    plotted in the notebook — worth checking directly rather than only the
+    summary numbers, since a mean alone can hide a policy that's a mix of
+    great and terrible runs averaging out to something plausible-looking.
 - Measured cost curve: PFN forward time vs `t` and vs `C`, confirming the
   `O(t(t+C))` attention term and the `O(C)` MLP term. Use it to pick `C`.
   ✅ Measured (`t∈[4,64]` at `C=64`: 4.5→6.8ms; `C∈[16,256]` at `t=16`:

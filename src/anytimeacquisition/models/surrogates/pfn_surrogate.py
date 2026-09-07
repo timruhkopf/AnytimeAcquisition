@@ -5,13 +5,11 @@ reads a trained PFN checkpoint through, rather than every caller poking at
 architecture and `models/bar_distribution.py` output head; doesn't
 reimplement either.
 
-Reuses `models/baselines/pfn_acquisition.py`'s `expected_improvement`
-(already implemented and cross-checked against Monte Carlo there) rather
-than duplicating it. `probability_of_improvement` is new here — the bar
-distribution's own docstring notes EI/PI/UCB were deliberately dropped from
-`BarDistribution` itself ("belongs to M6's [now M7's] classical baselines
-instead, not the PFN's own output head"), so this lives alongside
-`expected_improvement`, not on `BarDistribution`.
+Derived scalars (`expected_improvement`/`probability_of_improvement`/
+`mean_std` below) call straight through to `BarDistribution.ei`/`.pi`/
+`.mean`/`.variance` (2026-09-08: ported onto that class from PFNs4BO's own
+reference implementation — see `bar_distribution.py`'s docstring) rather
+than reimplementing any of them here.
 
 **Intra-step KV caching only (§2.11), by construction, not an explicit
 cache object:** `PFN`'s train-side self-attention never depends on the test
@@ -27,21 +25,7 @@ a previous step's forward pass is reusable at the next one).
 import torch
 
 from anytimeacquisition.models.bar_distribution import BarDistribution
-from anytimeacquisition.models.baselines.pfn_acquisition import expected_improvement
 from anytimeacquisition.models.pfn import PFN
-
-
-def probability_of_improvement(bar_dist: BarDistribution, logits: torch.Tensor, threshold: torch.Tensor) -> torch.Tensor:
-    """Closed-form `P(Y < threshold)` under the piecewise-uniform bar
-    density (this project minimizes throughout) — the CDF at `threshold`,
-    same clamped-bucket trick as `expected_improvement`. logits: [...,
-    n_bins]  threshold: broadcastable to `logits.shape[:-1]` -> [...]."""
-    lo, hi = bar_dist.borders[:-1], bar_dist.borders[1:]
-    thr = threshold.unsqueeze(-1)
-    clamped = thr.clamp(lo, hi)
-    bucket_cdf = (clamped - lo) / bar_dist.bucket_widths
-    p = torch.softmax(logits, -1)
-    return (p * bucket_cdf).sum(-1)
 
 
 class PFNSurrogate:
@@ -82,7 +66,7 @@ class PFNSurrogate:
         logits = self.predict(x_context, y_context, candidates)
         if incumbent is None:
             incumbent = y_context.min(dim=1).values
-        return expected_improvement(self.bar_dist, logits, incumbent.unsqueeze(-1)), logits
+        return self.bar_dist.ei(logits, incumbent.unsqueeze(-1)), logits
 
     def probability_of_improvement(
         self, x_context: torch.Tensor, y_context: torch.Tensor, candidates: torch.Tensor,
@@ -91,7 +75,7 @@ class PFNSurrogate:
         logits = self.predict(x_context, y_context, candidates)
         if threshold is None:
             threshold = y_context.min(dim=1).values
-        return probability_of_improvement(self.bar_dist, logits, threshold.unsqueeze(-1)), logits
+        return self.bar_dist.pi(logits, threshold.unsqueeze(-1)), logits
 
     def mean_std(
         self, x_context: torch.Tensor, y_context: torch.Tensor, candidates: torch.Tensor,

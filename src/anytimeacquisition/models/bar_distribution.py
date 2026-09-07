@@ -1,10 +1,20 @@
 """Bar (Riemann) distribution output head — ported from PFNs4BO's
-`pfns4bo/bar_distribution.py` (Müller et al., ICML 2023), trimmed to what
-M2 needs (NLL, mean/median/variance, mode) plus `entropy()`, which the
-original doesn't have but M5's explore-branch search needs (closed-form,
-no Monte Carlo — see the design doc). Dropped PFNs4BO's smoothing,
-mean-prediction-loss, and EI/PI/UCB machinery — not needed here, EI/PI/UCB
-belongs to M6's classical baselines instead, not the PFN's own output head.
+`pfns4bo/bar_distribution.py` (Müller et al., ICML 2023; vendored reference
+at `archive/src/utils/bar_distribution.py`). NLL, mean/median/mode/variance,
+`quantile`, `ucb`, closed-form `ei`/`pi` (2026-09-08: moved onto this class
+from `models/baselines/pfn_acquisition.py`/`models/surrogates/pfn_surrogate.py`
+— an earlier version of this docstring said EI/PI/UCB were deliberately
+dropped here ("belongs to the classical baselines instead"); reversed by
+user request, they live here now, matching PFNs4BO's own layout) plus
+`entropy()`, which the original doesn't have but M5's explore-branch search
+needs (closed-form, no Monte Carlo — see the design doc). `ei`/`pi`/`ucb`
+are all mirrored for this project's minimize convention — the reference
+assumes maximization throughout; see each method's own docstring for the
+exact mirroring. Not ported: `smoothing`/`mean_prediction_logits` (both
+`forward()`-only training-loss features, unused so far — see
+`archive`'s own `forward()` for the shape if ever needed) and
+`FullSupportBarDistribution`'s half-normal tail extrapolation (this
+project uses fixed, bounded borders instead — see below).
 
 Fixed `[0, 1]` borders (bounded, not PFNs4BO's FullSupportBarDistribution)
 — matches M1's ECDF-normalized-to-[0,1] prior output. See
@@ -82,6 +92,58 @@ class BarDistribution(nn.Module):
         bucket_means = self.borders[:-1] + self.bucket_widths / 2
         return bucket_means[logits.argmax(-1)]
 
+    def quantile(self, logits: torch.Tensor, center_prob: float = 0.682) -> torch.Tensor:
+        """[lo, hi] interval containing `center_prob` probability mass
+        around the median. Ported from PFNs4BO's own `BarDistribution.quantile`
+        (`archive/src/utils/bar_distribution.py`) — direction-agnostic (an
+        interval, not an improvement), no min/max mirroring needed.
+        -> [..., 2] (logits.shape[:-1] + [2])."""
+        side_prob = (1.0 - center_prob) / 2
+        return torch.stack((self.icdf(logits, side_prob), self.icdf(logits, 1.0 - side_prob)), dim=-1)
+
+    def ucb(self, logits: torch.Tensor, rest_prob: float = (1 - 0.682) / 2) -> torch.Tensor:
+        """Optimistic-for-minimization confidence bound: the `rest_prob`
+        lower quantile (the project minimizes throughout — this is the
+        mirror of PFNs4BO's own `ucb`, which for *maximization* takes the
+        `1 - rest_prob` *upper* quantile via the same `icdf`; swapping which
+        tail is "optimistic" is the same mirroring `ei`/`pi` below use).
+        `rest_prob=(1-0.682)/2` (the default, matching the reference) is the
+        amount of density beyond the confidence bound being ignored,
+        equivalent to GP-UCB/LCB with `beta=1`."""
+        return self.icdf(logits, rest_prob)
+
+    def ei(self, logits: torch.Tensor, best_f: torch.Tensor) -> torch.Tensor:
+        """Closed-form `E[max(best_f - Y, 0)]` under the piecewise-uniform
+        bar density (this project minimizes) — ported from PFNs4BO's own
+        `BarDistribution.ei` (`archive/src/utils/bar_distribution.py`,
+        which assumes maximization: `E[max(Y - best_f, 0)]`), algebraically
+        mirrored for minimization (swap which border plays the "active"
+        role: the reference's `borders[1:]` becomes `borders[:-1]` here).
+        Cross-checked against a Monte Carlo estimate in
+        `tests/test_bar_distribution.py` — not trusted on the algebra
+        alone. logits: [..., n_bins]  best_f: broadcastable to
+        `logits.shape[:-1]` -> [...]."""
+        lo, hi = self.borders[:-1], self.borders[1:]
+        inc = best_f.unsqueeze(-1)  # [..., 1], broadcasts against the n_bins axis
+        clamped = inc.clamp(lo, hi)  # [..., n_bins]
+        bucket_contributions = (inc * (clamped - lo) - (clamped**2 - lo**2) / 2) / self.bucket_widths
+        p = torch.softmax(logits, -1)
+        return (p * bucket_contributions).sum(-1)
+
+    def pi(self, logits: torch.Tensor, best_f: torch.Tensor) -> torch.Tensor:
+        """Closed-form `P(Y < best_f)` under the piecewise-uniform bar
+        density (this project minimizes) — ported from PFNs4BO's own
+        `BarDistribution.pi` (assumes maximization: `P(Y > best_f)`),
+        mirrored the same way `ei` above is. Same clamped-bucket trick.
+        logits: [..., n_bins]  best_f: broadcastable to
+        `logits.shape[:-1]` -> [...]."""
+        lo, hi = self.borders[:-1], self.borders[1:]
+        thr = best_f.unsqueeze(-1)
+        clamped = thr.clamp(lo, hi)
+        bucket_cdf = (clamped - lo) / self.bucket_widths
+        p = torch.softmax(logits, -1)
+        return (p * bucket_cdf).sum(-1)
+
 
 if __name__ == "__main__":
     torch.manual_seed(0)
@@ -104,3 +166,19 @@ if __name__ == "__main__":
     print("NLL under uniform logits (expect ~0, since density=1 everywhere):", nll.tolist())
 
     print("mean under uniform logits (expect ~0.5):", bd.mean(uniform_logits).tolist())
+
+    # ei/pi/ucb/quantile sanity, under a confident distribution centered
+    # near bucket 5's midpoint (~0.5/64*5+... roughly 0.086) -- best_f well
+    # above that point should have EI close to (best_f - mode) and PI close
+    # to 1 (the distribution's mass is almost certainly below best_f);
+    # best_f well below it should have both close to 0.
+    mode_val = bd.mode(confident_logits).item()
+    print(f"mode of the confident distribution: {mode_val:.4f}")
+    print("EI at best_f=0.9 (expect ~0.9 - mode, large):", bd.ei(confident_logits, torch.tensor([0.9])).item())
+    print("EI at best_f=0.01 (expect ~0.0, mode is above it):", bd.ei(confident_logits, torch.tensor([0.01])).item())
+    print("PI at best_f=0.9 (expect ~1.0):", bd.pi(confident_logits, torch.tensor([0.9])).item())
+    print("PI at best_f=0.01 (expect ~0.0):", bd.pi(confident_logits, torch.tensor([0.01])).item())
+    print("68.2% quantile interval under uniform logits (expect ~[0.159, 0.841]):",
+          bd.quantile(uniform_logits[:1]).tolist())
+    print("ucb (optimistic-for-min lower quantile) under uniform logits (expect ~0.159):",
+          bd.ucb(uniform_logits[:1]).tolist())
