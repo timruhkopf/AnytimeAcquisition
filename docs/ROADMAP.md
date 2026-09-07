@@ -456,8 +456,8 @@ Deliverables:
 **Known gap, not blocking:** `priors/bnn.py` still doesn't implement input
 warping (deliberately shelved per its own docstring, pre-dating this
 roadmap) — not exercised by any of the above criteria, revisit if M2's
-surrogate-quality comparison against HEBO+ or M8's transfer results suggest
-the prior itself is the bottleneck rather than the policy.
+surrogate-quality comparison or M8's transfer results suggest the prior
+itself is the bottleneck rather than the policy.
 
 ---
 
@@ -465,14 +465,15 @@ the prior itself is the bottleneck rather than the policy.
 
 `src/anytimeacquisition/models/surrogates/pfn_surrogate.py` (wraps the existing `models/pfn.py`)
 - Wrapper around PFNs4BO's **BNN-prior** model (6 layers, `emsize=512`).
-- `no_grad`, bf16.
+- `no_grad`, bf16 (lower precision yes, but make sure that ulysses can deal with it; notice, that for any loss calculation).
+on top of the pfn should upcast before using bardistribution to avoid numerical issues in e.g. kl/nll calulations)
 - API: `predict(D_t, candidates) -> BarDistribution[C, n_bins]`.
 - Intra-step KV caching only (§2.11). Do not build a cross-step cache.
 - Derived scalars from the bar distribution: closed-form EI, PI at 3–4
-  thresholds, `μ`, `σ`.
+  thresholds, `μ`, `σ`. Notice, these are available from BarDistribution on the logits already (IFBO/PFNs4BO implemented this).
 
 **Exit criterion (this is the risk gate for §2.12)**
-- Standalone BO with this surrogate + EI, benchmarked against PFNs4BO's HEBO+
+- Standalone BO with this pfn surrogate + EI, benchmarked against a Botorch GP + EI
   model on a shared task set. **Record the gap.**
 - Measured cost curve: PFN forward time vs `t` and vs `C`, confirming the
   `O(t(t+C))` attention term and the `O(C)` MLP term. Use it to pick `C`.
