@@ -376,6 +376,16 @@ is a later robustness experiment.
 Each milestone has an explicit **exit criterion**. Do not start the next
 milestone until it is met.
 
+- [ ] M0 — Kill test (GO / NO-GO)
+- [ ] M1 — Environment + reward
+- [ ] M2 — Frozen surrogate harness + prior sanity check
+- [ ] M3 — Exact-DP oracle harness
+- [ ] M4 — Q-head + warm start
+- [ ] M5 — Branching data generation + core training loop
+- [ ] M6 — Stability machinery
+- [ ] M7 — Baselines and evaluation
+- [ ] M8 — Transfer (this is the actual result)
+
 ### M0 — Kill test (GO / NO-GO) ⛔
 
 **~1 day. Everything downstream is conditional on this.**
@@ -399,7 +409,7 @@ remaining content is the value transform, which requires no learned policy.
 **Stop and re-scope.**
 
 Deliverables:
-- `experiments/m0_kill_test.py`
+- `notebooks/m0_kill_test.ipynb`
 - Plot: policy divergence vs `B`; exploitativeness metric vs `B`.
 - A written GO/NO-GO paragraph.
 
@@ -409,7 +419,7 @@ Deliverables:
 
 **Components**
 
-`bo_policy/env/bnn_prior.py`
+`src/anytimeacquisition/priors/bnn.py` (already exists, extend rather than rebuild)
 - Sampler matching PFNs4BO's BNN prior: 8–15 layers, 36–150 hidden units, tanh,
   weights `~ N(0, σ)` with `σ ~ U[0.089, 0.193]`, 14.5% of weights zeroed with
   the remainder rescaled by `(1 − 0.145)^(−1/2)`, pre-activation Gaussian noise,
@@ -417,7 +427,7 @@ Deliverables:
 - Returns a **callable** `f: [0,1]^d → R`, batched, differentiable.
 - Fixed seed ⇒ reproducible function.
 
-`bo_policy/env/reward.py`
+`src/anytimeacquisition/reward/tail_quantile_reward.py` (already exists, extend)
 - `build_ecdf(f, d, N=100_000)` → sorted array. Sobol, not uniform pseudo-random.
   `N=10^5` is chosen for **sufficiency** (5 decades ≥ the 4-decade clip), not
   cost — it is ~13 ms/function on GPU and negligible either way.
@@ -438,7 +448,7 @@ Deliverables:
 
 ### M2 — Frozen surrogate harness + prior sanity check
 
-`bo_policy/surrogate/pfn.py`
+`src/anytimeacquisition/models/surrogates/pfn_surrogate.py` (wraps the existing `models/pfn.py`)
 - Wrapper around PFNs4BO's **BNN-prior** model (6 layers, `emsize=512`).
 - `no_grad`, bf16.
 - API: `predict(D_t, candidates) -> BarDistribution[C, n_bins]`.
@@ -458,7 +468,7 @@ Deliverables:
 
 **The only place correctness can be verified rather than merely measured.**
 
-`bo_policy/oracle/discrete_dp.py`
+`src/anytimeacquisition/oracle/discrete_dp.py` (new group)
 - `d ≤ 2`, grid `k=16` ⇒ 256 actions.
 - Exact optimal policy and `Q*` by backward dynamic programming over the belief,
   under the same `g` reward and the same budget-conditioned AUC objective.
@@ -474,7 +484,7 @@ curve.
 
 ### M4 — Q-head + warm start
 
-`bo_policy/model/q_head.py` — ~5–10M params, small relative to the frozen backbone
+`src/anytimeacquisition/models/acquisition/q_head.py` — ~5–10M params, small relative to the frozen backbone
 (§1.2).
 
 Per-candidate inputs:
@@ -496,13 +506,13 @@ differ between train and deploy.
 **Output: bar distribution over `Â ∈ [0,1]`**, ~32 bins, cross-entropy loss.
 Take the distribution's **mean** for argmax and for bootstrapping.
 
-`bo_policy/model/proposer.py` — identical at train and deploy (§2.9):
+`src/anytimeacquisition/search/proposer.py` — identical at train and deploy (§2.9):
 1. Sobol screen
 2. perturbations around incumbent and runners-up, `σ` shrinking with `m`
 3. top-k by EI
 4. gradient ascent on `Q` (differentiable in `a`)
 
-`bo_policy/train/warm_start.py`
+`src/anytimeacquisition/trainer/warm_start.py`
 - Generate EI trajectories, compute returns, regress `Â`.
 
 **Exit criterion**
@@ -570,7 +580,7 @@ the gating accept/reject sequence.
 
 ### M7 — Baselines and evaluation
 
-`bo_policy/baselines/`
+`src/anytimeacquisition/models/baselines/`
 - `EI`
 - **`g-EI` — MANDATORY (§2.1).** Myopic EI in `g`-space, using the oracle ECDF.
   Not deployable on real problems; included precisely to isolate source #1.
@@ -618,35 +628,54 @@ reward unbounded while the target is clamped (§2.4).
 
 ## 4. Repository layout
 
+No new top-level package. Per `CLAUDE.md`, every component lives under
+`src/anytimeacquisition/<group>/` with a matching `configs/<group>/` Hydra
+group; tests mirror `src/`. `priors/bnn.py` and `models/pfn.py` already exist
+and are **reused**, not rebuilt — the M1/M2 line items below extend them
+rather than starting fresh.
+
 ```
-bo_policy/
-  env/
-    bnn_prior.py          # M1 — callable f sampler
-    reward.py             # M1 — ECDF, clipped reward, advantage + mask
-    ecdf.py               # M1
-  surrogate/
-    pfn.py                # M2 — frozen wrapper, intra-step KV cache
-    bar_distribution.py   # M2 — re-binning, EI/PI closed forms
-  model/
-    q_head.py             # M4 — bar-distribution output over Â
-    budget_encoding.py    # M4 — token + adaLN paths
-    proposer.py           # M4 — shared train/deploy candidate generation
-  train/
-    warm_start.py         # M4
-    branch.py             # M5 — K candidates, CRN, on-policy continuation
-    targets.py            # M5 — normalized returns, bootstrap
-    loop.py               # M5
-    gating.py             # M6
-    replay.py             # M6
-  baselines/
-    ei.py, g_ei.py, mfpi_random.py, kg_head.py   # M7
+src/anytimeacquisition/
+  priors/
+    bnn.py                       # M1 — already exists: callable, batched, differentiable f sampler
+  reward/
+    tail_quantile_reward.py      # M1 — already exists: ECDF/GPD tail reward; extend with
+                                  #      build_ecdf(Sobol) + normalized_advantage(+mask)
+  models/
+    pfn.py                       # M2 — already exists: the frozen backbone
+    bar_distribution.py          # M2 — already exists: extend with re-binning, EI/PI closed forms
+    surrogates/
+      pfn_surrogate.py           # M2 — new: frozen wrapper, predict(D_t, candidates) -> BarDistribution,
+                                  #      intra-step-only KV cache (§2.11)
+    acquisition/
+      q_head.py                  # M4 — bar-distribution output over Â
+      budget_encoding.py         # M4 — token + adaLN paths
+    baselines/
+      gp_acquisition.py, pfn_acquisition.py   # already exist
+      ei.py, g_ei.py, mfpi_random.py, kg_head.py   # M7 — new
+  search/
+    exploit.py, explore.py, interesting_points.py  # already exist (prior design; reassess for reuse)
+    proposer.py                  # M4 — new: shared train/deploy candidate generation
+  trainer/
+    pfn_trainer.py                # already exists
+    warm_start.py                 # M4 — new
+    branch.py                     # M5 — new: K candidates, CRN, on-policy continuation
+    targets.py                    # M5 — new: normalized returns, bootstrap
+    gating.py                     # M6 — new
+    replay.py                     # M6 — new
+  pipelines/
+    train_pfn.py                  # already exists
+    train_q_head.py                # M5 — new Hydra entry point for the branch-and-replay loop
   oracle/
-    discrete_dp.py        # M3 — exact Q* for d ≤ 2
-  eval/
-    diagnostics.py        # §6 — all of them
-    benchmarks.py         # M7/M8
-experiments/
-  m0_kill_test.py
+    discrete_dp.py                 # M3 — new group: exact Q* for d ≤ 2
+  metrics/
+    inc_auc.py                     # already exists
+    diagnostics.py                 # §6 — new: ranking accuracy, m-shuffle, behavior leakage, etc.
+  benchmarks/
+    dummy.py                       # already exists
+    hpo_b.py, pd1.py, bayesmark.py # M8 — new
+notebooks/
+  m0_kill_test.ipynb               # M0 — executed, outputs committed per repo convention
   ...
 ```
 
