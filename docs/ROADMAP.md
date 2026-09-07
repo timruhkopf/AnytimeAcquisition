@@ -378,7 +378,7 @@ milestone until it is met.
 
 - [x] M0 — Kill test (GO / NO-GO) — see `notebooks/m0_kill_test.ipynb`
 - [x] M1 — Environment + reward — clip-bind rate 0.236, see `reward/tail_quantile_reward.py`
-- [ ] M2 — Frozen surrogate harness + prior sanity check
+- [x] M2 — Frozen surrogate harness + prior sanity check — preliminary/smoke-checkpoint reading, see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`
 - [ ] M3 — Exact-DP oracle harness
 - [ ] M4 — Q-head + warm start
 - [ ] M5 — Branching data generation + core training loop
@@ -463,20 +463,58 @@ itself is the bottleneck rather than the policy.
 
 ### M2 — Frozen surrogate harness + prior sanity check
 
-`src/anytimeacquisition/models/surrogates/pfn_surrogate.py` (wraps the existing `models/pfn.py`)
-- Wrapper around PFNs4BO's **BNN-prior** model (6 layers, `emsize=512`).
-- `no_grad`, bf16 (lower precision yes, but make sure that ulysses can deal with it; notice, that for any loss calculation).
-on top of the pfn should upcast before using bardistribution to avoid numerical issues in e.g. kl/nll calulations)
-- API: `predict(D_t, candidates) -> BarDistribution[C, n_bins]`.
-- Intra-step KV caching only (§2.11). Do not build a cross-step cache.
-- Derived scalars from the bar distribution: closed-form EI, PI at 3–4
-  thresholds, `μ`, `σ`. Notice, these are available from BarDistribution on the logits already (IFBO/PFNs4BO implemented this).
+`src/anytimeacquisition/models/surrogates/pfn_surrogate.py` (wraps the existing `models/pfn.py`) — **done 2026-09-07**
+- Wrapper around **our own** BNN-prior-trained PFN (`models/pfn.py`, checkpoint
+  `models/pfn_variable_xdim_smoke.pt`: `d_model=64, n_layers=4` — not literally
+  PFNs4BO's own `emsize=512` weights, we don't have those, this is a from-scratch
+  model trained on the same *kind* of prior).
+- `no_grad`, bf16 autocast, upcast to fp32 before any `BarDistribution` op
+  (softmax/log-softmax near ties in bf16 is unreliable) — done via
+  `PFNSurrogate.predict()`'s `.float()` before returning logits. Not yet
+  verified on `ulysses`'s actual GPU whether bf16 autocast is a real speedup
+  there (only run on CPU so far, where it's correct but not necessarily
+  faster) — check before assuming it helps.
+- API: `PFNSurrogate.predict(x_context, y_context, candidates) -> logits [B,C,n_bins]`.
+- Intra-step KV caching only (§2.11) — by construction (one batched forward
+  call per whole candidate pool; the PFN's train-side attention never sees
+  test tokens), no explicit cache object needed. Do not build a cross-step cache.
+- Derived scalars: `expected_improvement` (reused from
+  `models/baselines/pfn_acquisition.py`, already existed) + new
+  `probability_of_improvement`, both closed-form off the bar distribution's
+  logits, plus `mean_std` (`BarDistribution.mean`/`.variance`, already
+  existed). **Correction to this bullet's original wording:** `BarDistribution`
+  itself does *not* have EI/PI built in — its own docstring says this was
+  deliberately dropped during the PFNs4BO port ("belongs to M6's [now M7's]
+  classical baselines instead, not the PFN's own output head"), so these live
+  in `pfn_surrogate.py`/`pfn_acquisition.py` instead, not on `BarDistribution`.
 
-**Exit criterion (this is the risk gate for §2.12)**
+**Exit criterion (this is the risk gate for §2.12) — preliminary reading 2026-09-07,
+see `notebooks/m2_pfn_surrogate_vs_ei.ipynb`**
 - Standalone BO with this pfn surrogate + EI, benchmarked against a Botorch GP + EI
   model on a shared task set. **Record the gap.**
+  ⚠️ Done, but on `pfn_variable_xdim_smoke.pt` — a 500-step, explicitly
+  "not a serious training run" checkpoint (its own experiment config's
+  comment) — so treat this as a pipeline check, not the real gate decision:
+  - `x_dim=1`, 20 shared tasks, 12 steps: PFN+EI **beats** GP+EI (mean
+    log-incumbent AUC `-31.53` vs `-24.51`, gap `-7.02`) — but with a large
+    standard error (`±10.6` vs GP's `±5.1`), so this could be a few lucky
+    trajectories, not a reliable win.
+  - `x_dim=2`, same setup: PFN+EI **loses** to both GP+EI and random search
+    (`-19.62` vs GP's `-21.77`, gap `+2.15`) — plausible given the
+    checkpoint's variable-dim training barely ran and dimensionality is
+    exactly where `callbacks/dim_validation.py` was added to watch for
+    degradation.
+  - **Re-run this notebook on a properly trained checkpoint before treating
+    either result as real** — right now it mainly confirms the comparison
+    pipeline (shared tasks, both policies' conventions, AUC scoring) is
+    correctly wired, not that the surrogate is or isn't trustworthy yet.
 - Measured cost curve: PFN forward time vs `t` and vs `C`, confirming the
   `O(t(t+C))` attention term and the `O(C)` MLP term. Use it to pick `C`.
+  ✅ Measured (`t∈[4,64]` at `C=64`: 4.5→6.8ms; `C∈[16,256]` at `t=16`:
+  4.1→7.1ms, CPU) — near-linear over this range, consistent with fixed
+  per-call overhead still dominating the quadratic/attention term at these
+  small sizes; re-measure at the larger `t`/`C` M4-M7 will actually use
+  before picking `C` from this curve.
 
 ---
 
