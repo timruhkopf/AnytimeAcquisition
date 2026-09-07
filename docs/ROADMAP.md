@@ -377,7 +377,7 @@ Each milestone has an explicit **exit criterion**. Do not start the next
 milestone until it is met.
 
 - [x] M0 — Kill test (GO / NO-GO) — see `notebooks/m0_kill_test.ipynb`
-- [ ] M1 — Environment + reward
+- [x] M1 — Environment + reward — clip-bind rate 0.236, see `reward/tail_quantile_reward.py`
 - [ ] M2 — Frozen surrogate harness + prior sanity check
 - [ ] M3 — Exact-DP oracle harness
 - [ ] M4 — Q-head + warm start
@@ -436,13 +436,28 @@ Deliverables:
 - **Instrumentation (required):** clip-bind rate and advantage-mask rate,
   logged per run.
 
-**Exit criterion**
+**Exit criterion — met 2026-09-07, see `tests/test_tail_quantile_reward.py`**
 - Reward is scale-invariant: two functions differing by a monotone rescaling
   produce identical reward trajectories for the same query sequence. Assert in a
-  test.
+  test. ✅ `test_reward_is_scale_invariant_under_monotone_rescaling`.
 - Clip-bind rate measured on EI trajectories. Record it — it decides M8.
+  ✅ **0.236** (23.6%), 8 fresh 2-D BNN draws, 15-step `gp_acquisition_policy(EI)`
+  rollout, `n_samples=100_000` Sobol reference (`python -m
+  anytimeacquisition.reward.tail_quantile_reward`, seeds fixed — rerun for an
+  exact reproduction, this is one seed's reading, not yet averaged over many).
+  Non-trivial (neither ~0 nor ~1) — worth a wider seed sweep before trusting it
+  as *the* number M8 gates on, but doesn't yet argue either way for
+  reinstating the GPD tail.
 - No `nan` reachable anywhere in the reward path (property test with adversarial
-  inputs).
+  inputs). ✅ Found and fixed the exact `_gpd_survival` bug §2.3 predicted (no
+  guard existed yet); `test_gpd_survival_handles_past_the_finite_endpoint_without_nan`,
+  `test_unclipped_gpd_reward_never_produces_nan_for_adversarial_deep_tail`.
+
+**Known gap, not blocking:** `priors/bnn.py` still doesn't implement input
+warping (deliberately shelved per its own docstring, pre-dating this
+roadmap) — not exercised by any of the above criteria, revisit if M2's
+surrogate-quality comparison against HEBO+ or M8's transfer results suggest
+the prior itself is the bottleneck rather than the policy.
 
 ---
 
