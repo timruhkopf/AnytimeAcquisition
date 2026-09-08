@@ -1,8 +1,13 @@
 import torch
 
-from anytimeacquisition.models.layer_locked_readout import LayerLockedReadout
+from anytimeacquisition.models.layer_locked_readout import LayerLockedReadout, load_checkpoint, save_checkpoint
 
 D_MODEL_PFN, D_EXPERT, N_HEADS, N_LAYERS, D_FF, MAX_X_DIM, N_OUT = 16, 8, 2, 4, 32, 2, 1
+READOUT_CONFIG = dict(
+    d_model_pfn=D_MODEL_PFN, d_expert=D_EXPERT, n_heads=N_HEADS, n_layers=N_LAYERS,
+    d_ff=D_FF, max_x_dim=MAX_X_DIM, n_out=N_OUT,
+)
+SCORE_CONFIG = dict(n_bins=16, z_lo=-6.0, z_hi=0.0)
 
 
 def _readout():
@@ -94,3 +99,53 @@ def test_gradient_flows_to_expert_params_only():
     out.sum().backward()
     for p in readout.parameters():
         assert p.grad is not None
+
+
+def test_checkpoint_round_trip_reproduces_identical_output(tmp_path):
+    readout = _readout()
+    layer_hidden, x_query, incumbent_idx = _inputs()
+    out = readout(x_query, layer_hidden, incumbent_idx)
+
+    ckpt_path = tmp_path / "readout.pt"
+    save_checkpoint(
+        readout, ckpt_path, READOUT_CONFIG, SCORE_CONFIG,
+        pfn_checkpoint_path="models/pfn_variable_xdim_smoke.pt",
+        history={"step": [0, 1], "loss": [1.0, 0.5]}, metrics={"pooled_rho": 0.9},
+    )
+    reloaded, bar_dist_score, ckpt = load_checkpoint(ckpt_path, device="cpu")
+
+    out_reloaded = reloaded(x_query, layer_hidden, incumbent_idx)
+    assert torch.equal(out, out_reloaded)
+    assert bar_dist_score.num_bars == SCORE_CONFIG["n_bins"]
+    assert ckpt["pfn_checkpoint_path"] == "models/pfn_variable_xdim_smoke.pt"
+    assert ckpt["metrics"]["pooled_rho"] == 0.9
+    assert ckpt["history"]["loss"] == [1.0, 0.5]
+
+
+def test_checkpoint_creates_parent_directories(tmp_path):
+    readout = _readout()
+    ckpt_path = tmp_path / "nested" / "dir" / "readout.pt"
+    save_checkpoint(readout, ckpt_path, READOUT_CONFIG, SCORE_CONFIG)
+    assert ckpt_path.exists()
+
+
+def test_load_checkpoint_rejects_mismatched_state_dict(tmp_path):
+    """A shape mismatch (changed d_expert) raises via torch's own
+    load_state_dict(strict=False) before load_checkpoint's own
+    missing/unexpected check ever runs -- strict=False only suppresses
+    missing/extra KEYS, not shape mismatches within a shared key. Either
+    way, this must never silently load a wrong-shaped checkpoint."""
+    readout = _readout()
+    ckpt_path = tmp_path / "readout.pt"
+    save_checkpoint(readout, ckpt_path, READOUT_CONFIG, SCORE_CONFIG)
+
+    # Corrupt the saved config so it no longer matches the saved state_dict.
+    ckpt = torch.load(ckpt_path, weights_only=False)
+    ckpt["config"] = dict(READOUT_CONFIG, d_expert=D_EXPERT * 2)
+    torch.save(ckpt, ckpt_path)
+
+    try:
+        load_checkpoint(ckpt_path, device="cpu")
+        assert False, "expected a RuntimeError for a mismatched checkpoint"
+    except RuntimeError:
+        pass

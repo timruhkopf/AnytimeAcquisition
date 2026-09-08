@@ -40,8 +40,12 @@ the KV sequence. `incumbent_idx` (`y_train.argmin(dim=1)`) is the caller's
 responsibility, same division of labor as before: this module only ever
 sees the frozen PFN's own representations, never raw `x`/`y`.
 """
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+
+from anytimeacquisition.models.bar_distribution import BarDistribution, uniform_bin_borders
 
 
 class CrossAttnBlock(nn.Module):
@@ -126,6 +130,66 @@ class LayerLockedReadout(nn.Module):
         return self.head(self.out_ln(h))
 
 
+def save_checkpoint(
+    readout: "LayerLockedReadout",
+    path: str | Path,
+    readout_config: dict,
+    score_config: dict,
+    pfn_checkpoint_path: str | None = None,
+    history: dict | None = None,
+    metrics: dict | None = None,
+) -> None:
+    """Saves everything needed to reload `readout` and use it for inference
+    later without retraining -- e.g. probing it against new BNN instances or
+    train/query sets, the way `notebooks/vla_readout_ei_fit.ipynb` does.
+    `readout_config` is `LayerLockedReadout.__init__`'s kwargs (so
+    `load_checkpoint` can reconstruct the exact architecture before loading
+    weights); `score_config` (`n_bins`/`z_lo`/`z_hi`) is enough to
+    reconstruct the matching `BarDistribution` the readout's logits are
+    interpreted through, since that module owns no learnable parameters of
+    its own and so isn't worth checkpointing weights for. `pfn_checkpoint_path`
+    records which frozen PFN this readout was trained against -- its
+    predictions are only meaningful paired with that exact frozen model, not
+    a label to trust blindly at load time (a caller should still pass the
+    same checkpoint back into `load_pfn_checkpoint` explicitly). `history`/
+    `metrics` are optional bookkeeping (the training curve, final diagnostic
+    numbers) so a later session doesn't have to rerun evaluation just to see
+    what a saved checkpoint actually achieved."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_state": readout.state_dict(),
+            "config": readout_config,
+            "score_config": score_config,
+            "pfn_checkpoint_path": pfn_checkpoint_path,
+            "history": history or {},
+            "metrics": metrics or {},
+        },
+        path,
+    )
+
+
+def load_checkpoint(path: str | Path, device: str = "cpu") -> tuple["LayerLockedReadout", BarDistribution, dict]:
+    """Inverse of `save_checkpoint`. -> `(readout, bar_dist_score, ckpt)`,
+    `readout` already `.eval()`'d and moved to `device` -- mirrors
+    `pipelines/train_pfn.py`'s `load_pfn_checkpoint` return-shape convention
+    (model, its output-distribution head, the raw checkpoint dict) for a
+    consistent loading pattern across both PFN and readout checkpoints."""
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    readout = LayerLockedReadout(**ckpt["config"]).to(device)
+    missing, unexpected = readout.load_state_dict(ckpt["model_state"], strict=False)
+    if missing or unexpected:
+        raise RuntimeError(
+            f"checkpoint at {path} doesn't match LayerLockedReadout(**config)'s state_dict — "
+            f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+        )
+    readout.eval()
+    sc = ckpt["score_config"]
+    bar_dist_score = BarDistribution(uniform_bin_borders(sc["n_bins"], lo=sc["z_lo"], hi=sc["z_hi"])).to(device)
+    return readout, bar_dist_score, ckpt
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     B, t, Q, max_x_dim = 3, 7, 5, 2
@@ -161,3 +225,20 @@ if __name__ == "__main__":
     readout(x_query, layer_hidden, incumbent_idx)
     unchanged = all(torch.equal(a, b) for a, b in zip(layer_hidden, layer_hidden_before))
     print("caller's layer_hidden_states left untouched:", unchanged)
+
+    # Save/load round-trip: a reloaded checkpoint must reproduce identical
+    # output on the same inputs.
+    import tempfile
+
+    readout_config = dict(
+        d_model_pfn=d_model_pfn, d_expert=d_expert, n_heads=n_heads, n_layers=n_layers,
+        d_ff=d_ff, max_x_dim=max_x_dim, n_out=n_out,
+    )
+    score_config = dict(n_bins=16, z_lo=-6.0, z_hi=0.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        ckpt_path = Path(tmp) / "readout_demo.pt"
+        save_checkpoint(readout, ckpt_path, readout_config, score_config, history={"step": [0], "loss": [1.0]})
+        reloaded, bar_dist_score, ckpt = load_checkpoint(ckpt_path, device="cpu")
+        out_reloaded = reloaded(x_query, layer_hidden, incumbent_idx)
+        print("reloaded checkpoint reproduces identical output:", torch.equal(out, out_reloaded))
+        print("bar_dist_score.num_bars from reloaded score_config:", bar_dist_score.num_bars)
