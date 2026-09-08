@@ -211,6 +211,18 @@ def g_reward_minimize(y_sorted: torch.Tensor, v: torch.Tensor, max_score: float 
     return torch.from_numpy(g_from_percentile(tail_u.numpy(), max_score=max_score)).to(v.dtype)
 
 
+def g_reward_minimize_from_table(table, v: torch.Tensor, max_score: float = 4.0) -> torch.Tensor:
+    """`g_reward_minimize`'s counterpart for `priors/quantile_table.py`'s
+    `QuantileTable` (M0's `BOEnv`) instead of a raw `[B, N]` sorted array --
+    same `1 - percentile` flip, same minimize convention, just reading
+    `table.percentile(v)` instead of the free `percentile()` function above.
+    Kept separate rather than generalizing `g_reward_minimize` to accept
+    either, since `y_sorted`-array callers (`build_ecdf`, still used/tested
+    elsewhere) shouldn't have to duck-type against `QuantileTable`."""
+    tail_u = 1.0 - table.percentile(v)
+    return torch.from_numpy(g_from_percentile(tail_u.numpy(), max_score=max_score)).to(v.dtype)
+
+
 def normalized_advantage(
     G_bar: torch.Tensor, g_prev: torch.Tensor, sat_threshold: float = 1 - 1e-3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
