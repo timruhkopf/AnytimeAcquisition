@@ -63,13 +63,13 @@ BO-specific surrogate; PFNs4BO and ifBO both build on this line directly.
 
 ---
 
-## MetaBO / NAP — direct precedent for this project's own approach
+## MetaBO / NAP / FSAF — direct precedent for this project's own approach
 
 Named specifically in the design discussion `docs/ROADMAP.md` is based on
 as the reason to score a discrete candidate set with RL rather than output
 a continuous action (`docs/ROADMAP.md` §1.1) — kept as their own section
 rather than folded into the general acquisition-strategy list below,
-since these two are the direct precedent, not just adjacent work.
+since these are the direct precedent, not just adjacent work.
 
 ### Meta-Learning Acquisition Functions for Transfer Learning in Bayesian Optimization (MetaBO)
 Volpp, Fröhlich, Fischer, Doerr, Falkner, Hutter, Daniel — ICLR 2020.
@@ -80,9 +80,31 @@ distribution of related tasks (fixed GP surrogate), so the learned
 acquisition function picks up transferable structure in the objective
 functions rather than using a fixed hand-derived formula. The policy scores
 a **discrete candidate set** rather than outputting a continuous action
-directly — one of the two papers (with NAP, below) that established this
+directly — one of the papers (with NAP/FSAF, below) that established this
 is the parameterization that actually trains for learned acquisition
 functions, which is why this project adopts it too.
+
+**How it differs from our idea:** _TBD_.
+
+### Reinforced Few-Shot Acquisition Function Learning for Bayesian Optimization (FSAF)
+Hsieh, Hsieh, Liu — NeurIPS 2021.
+[proceedings.neurips.cc PDF](https://proceedings.neurips.cc/paper_files/paper/2021/file/3fab5890d8113d0b5a4178201dc842ad-Paper.pdf) ·
+[arXiv:2106.04335](https://arxiv.org/abs/2106.04335)
+
+Addresses the fact that no single hand-derived acquisition function is
+best across all problem types: learns a **distribution** of Q-networks (a
+Bayesian DQN variant) as acquisition functions, meta-trained (MAML-style,
+few-shot) across a family of tasks with a KL-regularization term to avoid
+overfitting to any one, and explicitly uses demonstration trajectories from
+existing classical acquisition functions as priors/warm-starting signal —
+the same shape of idea as this project's own `LogEI` distillation warm
+start (`docs/ROADMAP.md` §3 M2), independently arrived at. Reports being
+agnostic to input dimension and candidate-set cardinality. Notably
+DQN-based, i.e. value-based with a max over the candidate set — the exact
+pattern `docs/ROADMAP.md` §1.3 explicitly avoids (overestimation bias
+scaling with the number of actions maxed over); worth checking whether
+their reported results show any symptom of that when this section's "how
+it differs" gets filled in properly.
 
 **How it differs from our idea:** _TBD_.
 
