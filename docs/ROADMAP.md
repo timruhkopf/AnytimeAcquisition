@@ -115,7 +115,11 @@ and it protects PPD calibration from gradient signal originating in a saturating
 Per env step:
 
 - **Train tokens:** the `t` observed pairs, encoded exactly as during PFN pretraining. The
-  y-normalization is refit to `D_t` at every step — this matters (see 3.3).
+  y-normalization (`BarDistribution`'s bins, `BNNPrior`'s ECDF) is **fixed** — set once, never
+  refit per episode or per step (verified against the actual implementation, 2026-09-08; an
+  earlier version of this doc claimed it was refit to `D_t` every step, which doesn't match the
+  code and is corrected here). What DOES move over an episode is the incumbent `y*_t` within that
+  fixed representation — see 3.3.
 - **Query tokens:** the whole candidate pool `P` at once, `x_encoder(x*) + [MASK]` in the y slot.
   Cost is linear in `P` because query tokens don't attend to each other. `P = 512` is not
   meaningfully more expensive than `P = 32`.
@@ -146,12 +150,25 @@ criteria we haven't thought of.
 Two preprocessing choices make the raw representation strictly better than derived scalars rather
 than just more general:
 
-**Incumbent-relative bin alignment.** The PFN's y-transform is refit to `D_t` every step, and as
-the policy exploits, the observed set shifts up and narrows — so the same physical `y` maps to
-different bin indices at different `t`, and bin resolution in physical units changes over the
-episode. Resample the bin grid so `y*_t` sits at a fixed index. Every acquisition criterion is a
-functional of `p_k` *relative to the incumbent*, so this removes the dominant nuisance variation
-and makes a 1D conv over the bin axis meaningful.
+**Fixed representation, explicit incumbent conditioning — not bin re-alignment.** An earlier
+version of this section proposed resampling the bin grid every step so `y*_t` sits at a fixed
+index, reasoning that the PFN's y-transform is refit to `D_t` per step. That premise is wrong (see
+3.1) — the bins and the y-normalization are both fixed for the life of an episode. Re-indexing them
+anyway would still be a bad idea even if the premise held: it makes "bin `k`" mean something
+different at every `t` (wherever the incumbent happens to be), so a scorer training across many
+different `t` never sees a stable mapping to learn from, and it bakes "distance from incumbent"
+directly into the input's structure — which makes one-step-improvement prediction trivially
+readable off the input rather than a genuine test of what the model extracted (flagged directly by
+user review, 2026-09-08).
+
+Instead: keep the representation exactly as fixed as it already is, and condition on the incumbent
+*explicitly* — e.g. append `y*_t` itself (or the log-survival function evaluated at `y*_t`, since
+PI/EI are functionals evaluated there) as an extra feature/embedding, rather than transforming the
+axis. Every acquisition criterion is still a functional of `p_k` *relative to the incumbent*; the
+model gets what it needs to compute that from an explicit conditioning signal, not from a moving
+target dressed up as a fixed one. (Prototyped as a per-layer learned incumbent-anchor token in
+`models/layer_locked_readout.py`'s `LayerLockedReadout`, built for the §3.2 readout experiment —
+the same mechanism generalizes to this section's descriptor.)
 
 **Feed the log survival function, not the pdf.** `S_k(y) = P(y' > y)`. Then `PI = S_k(y*)` is a
 single index lookup and `EI = ∫_{y*}^∞ S_k` is a fixed linear functional; UCB is a quantile
