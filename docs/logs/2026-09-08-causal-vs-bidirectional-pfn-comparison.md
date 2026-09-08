@@ -171,3 +171,13 @@ benefit (the actual reason to want `causal=True` at all — see
 argument) is worth this quality cost is a real tradeoff now backed by a
 number, not a guess — that decision belongs wherever this project's
 current roadmap (`docs/ROADMAP.md`) ends up landing on it.
+
+## Decision (2026-09-08)
+
+Sticking with **bidirectional** for now. §4.3's `F·G` rollout batching already
+absorbs v1's cost story, so there's no forcing reason to take the quality hit
+above, and a more precise (permutation-invariant, lower-variance) surrogate
+reading is worth the arguably higher compute cost at this stage. The causal
+variant stays documented as `docs/MILESTONES.md`'s M9 — optional, not in the
+critical path, revisited only if M7's own instrumentation later shows PFN
+recompute dominating wall-clock beyond what batching absorbs.
