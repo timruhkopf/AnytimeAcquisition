@@ -25,16 +25,20 @@ Every candidate/query token is scored independently (no candidate-candidate
 self-attention) -- matches §3.4's pointwise-scorer decision; this module
 isolates the readout-mechanism question, not a second architecture change.
 
-**Incumbent anchor token.** Many acquisition criteria (EI, PI, UCB) are
-functionals evaluated AT the incumbent `y*_t` specifically, not just "some
-function of the context broadly." Rather than making the expert rediscover
-which of the `t` train tokens is the incumbent from context alone, a small
-per-layer learned embedding of `y*_t` is concatenated as an EXTRA key/value
-pair into that layer's cross-attention KV set. This never touches the
-frozen PFN's own forward pass (fully additive, expert-side only) and
-mirrors §3.3's own incumbent-relative philosophy (resampling the candidate
-descriptor's bin grid so `y*_t` sits at a fixed index) on the input/readout
-side instead of the output/descriptor side.
+**Incumbent anchor: an additive marker, not a synthetic token (revised
+2026-09-08, flagged by user review).** The first version encoded the
+incumbent's y-VALUE through a fresh, untrained `Linear(1, d_model_pfn)`
+per layer, concatenated as an extra key/value pair. That re-derives
+information the frozen PFN already computed: the incumbent is literally
+ONE of the `t` train tokens, so `layer_hidden_states[l][b, incumbent_idx]`
+already encodes its y-value richly through the frozen PFN's own pretrained
+`train_embed`. Marking that existing token (a small learned per-layer
+`nn.Parameter`, ADDED to its hidden state -- not deriving a new one from
+its raw value) reuses that pretrained representation instead of asking a
+fresh linear map to reconstruct it from a bare scalar, and doesn't grow
+the KV sequence. `incumbent_idx` (`y_train.argmin(dim=1)`) is the caller's
+responsibility, same division of labor as before: this module only ever
+sees the frozen PFN's own representations, never raw `x`/`y`.
 """
 import torch
 import torch.nn as nn
@@ -84,13 +88,12 @@ class LayerLockedReadout(nn.Module):
         super().__init__()
         self.n_layers = n_layers
         self.query_embed = nn.Linear(max_x_dim, d_expert)
-        # One small per-layer embedding, not one shared across layers: the
-        # frozen hidden states at different depths live in genuinely
-        # different representational spaces (each layer's own attention +
-        # FFN reshapes them), so the incumbent anchor needs a matching
-        # per-layer re-embedding to stay comparable to that layer's kv, not
-        # a single embedding reused verbatim everywhere.
-        self.incumbent_embed = nn.ModuleList([nn.Linear(1, d_model_pfn) for _ in range(n_layers)])
+        # One marker per layer, not shared across layers: the frozen hidden
+        # states at different depths live in genuinely different
+        # representational spaces, so "this is the incumbent" needs a
+        # matching per-layer marker to stay meaningful at that layer's kv.
+        self.incumbent_marker = nn.Parameter(torch.zeros(n_layers, d_model_pfn))
+        nn.init.normal_(self.incumbent_marker, std=0.02)
         self.cross_blocks = nn.ModuleList(
             [CrossAttnBlock(d_expert, d_model_pfn, n_heads, d_ff) for _ in range(n_layers)]
         )
@@ -98,21 +101,27 @@ class LayerLockedReadout(nn.Module):
         self.head = nn.Linear(d_expert, n_out)
 
     def forward(
-        self, x_query: torch.Tensor, layer_hidden_states: list[torch.Tensor], y_incumbent: torch.Tensor,
+        self, x_query: torch.Tensor, layer_hidden_states: list[torch.Tensor], incumbent_idx: torch.Tensor,
     ) -> torch.Tensor:
         """x_query: `[B,Q,max_x_dim]`. `layer_hidden_states`: `n_layers`
         tensors, each `[B,t,d_model_pfn]` -- the FROZEN PFN's train-token
         hidden state at that layer (caller's responsibility to run the
         frozen forward under `no_grad`; this module doesn't assume
         anything about where they came from, just that they don't require
-        grad). `y_incumbent`: `[B]`. -> logits `[B,Q,n_out]`."""
+        grad). `incumbent_idx`: `[B]` long, the index into the `t` axis of
+        the incumbent train point (`y_train.argmin(dim=1)`) -- NOT its
+        value; the marked hidden state already carries that. -> logits
+        `[B,Q,n_out]`."""
         assert len(layer_hidden_states) == self.n_layers, (
             f"expected {self.n_layers} layer hidden states, got {len(layer_hidden_states)}"
         )
+        B = x_query.shape[0]
+        batch_idx = torch.arange(B, device=x_query.device)
+
         h = self.query_embed(x_query)
         for l in range(self.n_layers):
-            inc_tok = self.incumbent_embed[l](y_incumbent.view(-1, 1, 1))  # [B,1,d_model_pfn]
-            kv = torch.cat([layer_hidden_states[l], inc_tok], dim=1)  # [B,t+1,d_model_pfn]
+            kv = layer_hidden_states[l].clone()  # don't mutate the caller's tensor
+            kv[batch_idx, incumbent_idx] = kv[batch_idx, incumbent_idx] + self.incumbent_marker[l]
             h = self.cross_blocks[l](h, kv)
         return self.head(self.out_ln(h))
 
@@ -125,9 +134,9 @@ if __name__ == "__main__":
     readout = LayerLockedReadout(d_model_pfn, d_expert, n_heads, n_layers, d_ff, max_x_dim, n_out)
     layer_hidden = [torch.randn(B, t, d_model_pfn) for _ in range(n_layers)]
     x_query = torch.rand(B, Q, max_x_dim)
-    y_incumbent = torch.rand(B)
+    incumbent_idx = torch.randint(0, t, (B,))
 
-    out = readout(x_query, layer_hidden, y_incumbent)
+    out = readout(x_query, layer_hidden, incumbent_idx)
     print("output shape:", out.shape)  # expect [3, 5, 1]
 
     # Query independence: perturbing query k's x must not change any OTHER
@@ -135,13 +144,20 @@ if __name__ == "__main__":
     # models/pfn.py's own test-test independence invariant.
     x_query_pert = x_query.clone()
     x_query_pert[:, 0, :] += 1.0
-    out_pert = readout(x_query_pert, layer_hidden, y_incumbent)
+    out_pert = readout(x_query_pert, layer_hidden, incumbent_idx)
     other_diff = (out[:, 1:] - out_pert[:, 1:]).abs().max().item()
     print("max diff at OTHER queries after perturbing query 0 (~0 expected):", other_diff)
 
-    # Incumbent anchor is actually used: varying y_incumbent alone (hidden
-    # states and x_query held fixed) must change the output.
-    y_incumbent_alt = y_incumbent + 0.3
-    out_alt_incumbent = readout(x_query, layer_hidden, y_incumbent_alt)
-    print("max diff from varying y_incumbent alone (>0 expected):",
+    # Incumbent anchor is actually used: moving WHICH index is marked as
+    # the incumbent (hidden states and x_query held fixed) must change the
+    # output.
+    incumbent_idx_alt = (incumbent_idx + 1) % t
+    out_alt_incumbent = readout(x_query, layer_hidden, incumbent_idx_alt)
+    print("max diff from moving the incumbent marker alone (>0 expected):",
           (out - out_alt_incumbent).abs().max().item())
+
+    # The caller's hidden-state tensors must not be mutated in place.
+    layer_hidden_before = [h.clone() for h in layer_hidden]
+    readout(x_query, layer_hidden, incumbent_idx)
+    unchanged = all(torch.equal(a, b) for a, b in zip(layer_hidden, layer_hidden_before))
+    print("caller's layer_hidden_states left untouched:", unchanged)

@@ -87,6 +87,42 @@ def test_ei_equals_best_f_minus_mean_when_above_support():
     assert torch.allclose(bd.ei(logits, best_f), best_f - bd.mean(logits), atol=1e-5)
 
 
+def test_ei_rejects_best_f_missing_the_broadcast_dim():
+    """The exact bug found 2026-09-08 (notebooks/vla_readout_ei_probe.ipynb):
+    passing best_f=[B] against 3D logits=[B,Q,n_bins] without pre-unsqueezing
+    silently mis-broadcasts (using a DIFFERENT batch item's threshold) rather
+    than raising, whenever B happens to equal Q. Must now raise instead."""
+    bd = BarDistribution(uniform_bin_borders(n_bins=8))
+    logits = torch.randn(4, 4, 8)  # B == Q == 4, the exact coincidence that hid the bug
+    best_f_missing_dim = torch.rand(4)
+    try:
+        bd.ei(logits, best_f_missing_dim)
+        assert False, "expected an assertion error for best_f missing the broadcast dim"
+    except AssertionError as e:
+        assert "unsqueeze" in str(e)
+
+    # Correct usage: pre-unsqueeze so best_f is shared across the query axis.
+    result = bd.ei(logits, best_f_missing_dim.unsqueeze(-1))
+    assert result.shape == (4, 4)
+
+
+def test_ei_with_per_env_threshold_matches_per_point_call():
+    """One threshold per env, shared across Q query points (the
+    LayerLockedReadout notebook's actual use case) must give the same
+    result as calling ei() once per query point with that env's own
+    threshold -- catches any cross-env mixups in the broadcast."""
+    torch.manual_seed(0)
+    bd = BarDistribution(uniform_bin_borders(n_bins=16))
+    B, Q = 3, 5
+    logits = torch.randn(B, Q, 16)
+    best_f = torch.rand(B)
+
+    batched = bd.ei(logits, best_f.unsqueeze(-1))  # [B, Q]
+    for b in range(B):
+        per_point = bd.ei(logits[b], best_f[b].expand(Q))  # [Q], using env b's own threshold
+        assert torch.allclose(batched[b], per_point, atol=1e-6)
+
+
 def test_pi_matches_monte_carlo():
     torch.manual_seed(0)
     bd = BarDistribution(uniform_bin_borders(n_bins=32))

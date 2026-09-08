@@ -121,8 +121,25 @@ class BarDistribution(nn.Module):
         role: the reference's `borders[1:]` becomes `borders[:-1]` here).
         Cross-checked against a Monte Carlo estimate in
         `tests/test_bar_distribution.py` — not trusted on the algebra
-        alone. logits: [..., n_bins]  best_f: broadcastable to
-        `logits.shape[:-1]` -> [...]."""
+        alone. logits: [..., n_bins]  best_f: caller must already have
+        unsqueezed a trailing singleton dim onto any axis `best_f` doesn't
+        vary over (e.g. `incumbent.unsqueeze(-1)` for one threshold shared
+        across a grid/query axis) -- `best_f.dim()` must equal
+        `logits.dim() - 1` on entry, asserted below. Silently mis-broadcasts
+        instead of raising if a caller passes `best_f` one dimension short
+        (e.g. `[B]` against `[B, n_query, n_bins]` logits) AND `B` happens
+        to equal `n_query` -- discovered 2026-09-08 via exactly that
+        coincidence in `notebooks/vla_readout_ei_probe.ipynb`, silently
+        computing every candidate's EI against a DIFFERENT, arbitrary
+        environment's incumbent instead of its own. The assert below turns
+        that into an immediate crash instead of a silent, hard-to-diagnose
+        correctness bug."""
+        assert best_f.dim() == logits.dim() - 1, (
+            f"best_f must have one fewer dim than logits ({logits.dim() - 1}), got {best_f.dim()} "
+            f"(best_f.shape={tuple(best_f.shape)}, logits.shape={tuple(logits.shape)}) -- "
+            "unsqueeze a trailing singleton dim onto any axis best_f doesn't vary over, "
+            "e.g. best_f.unsqueeze(-1) for one threshold shared across a grid/query axis"
+        )
         lo, hi = self.borders[:-1], self.borders[1:]
         inc = best_f.unsqueeze(-1)  # [..., 1], broadcasts against the n_bins axis
         clamped = inc.clamp(lo, hi)  # [..., n_bins]
@@ -135,8 +152,14 @@ class BarDistribution(nn.Module):
         density (this project minimizes) — ported from PFNs4BO's own
         `BarDistribution.pi` (assumes maximization: `P(Y > best_f)`),
         mirrored the same way `ei` above is. Same clamped-bucket trick.
-        logits: [..., n_bins]  best_f: broadcastable to
-        `logits.shape[:-1]` -> [...]."""
+        logits: [..., n_bins]  best_f: same calling convention as `ei`
+        above (`best_f.dim()` must equal `logits.dim() - 1`) -- see that
+        method's docstring for why this is asserted rather than assumed."""
+        assert best_f.dim() == logits.dim() - 1, (
+            f"best_f must have one fewer dim than logits ({logits.dim() - 1}), got {best_f.dim()} "
+            f"(best_f.shape={tuple(best_f.shape)}, logits.shape={tuple(logits.shape)}) -- "
+            "unsqueeze a trailing singleton dim onto any axis best_f doesn't vary over"
+        )
         lo, hi = self.borders[:-1], self.borders[1:]
         thr = best_f.unsqueeze(-1)
         clamped = thr.clamp(lo, hi)
