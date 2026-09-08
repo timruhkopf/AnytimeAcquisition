@@ -1,0 +1,27 @@
+# @package _global_
+# Real (not smoke) causal-PFN training run, variable x_dim -- matched
+# architecture/prior settings to the existing bidirectional reference
+# checkpoint (configs/experiment/pfn_variable_xdim_smoke.yaml, actually
+# trained 29,999 steps despite its own "smoke" name/config comment -- see
+# docs/ROADMAP.md session history) so the two are a fair architecture
+# comparison, not confounded by differing scale. n_steps is deliberately
+# higher than the bidirectional reference's own 29,999 -- causal training
+# has strictly more to learn (validity at every prefix/order, not just the
+# full permutation-invariant set), so it needs a genuine chance to close
+# any gap before concluding one exists; see the comparison notebook this
+# checkpoint feeds.
+# Run: uv run python -m anytimeacquisition.pipelines.train_pfn_causal experiment=pfn_causal_variable_xdim_real
+priors:
+  x_dim: 6
+  batch_size: 32
+  variable_dim_min: 1
+models:
+  surrogates:
+    d_model: 64
+    n_layers: 4
+    n_bins: 64
+trainer:
+  n_steps: 60000
+  log_every: 200
+  checkpoint_path: ${aa_root:}/models/pfn_causal_variable_xdim_real.pt
+validate_dims: [1, 2, 3, 4, 5, 6]
