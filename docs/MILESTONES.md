@@ -239,6 +239,47 @@ Conventions:
 
 ---
 
+## M9 — Optional: causal-masked PFN variant (not in the critical path)
+
+**Deps:** none of M0–M8 depend on this; **excluded from the dependency graph below on purpose** —
+building it never blocks anything else, and nothing else should be blocked waiting on it.
+
+**Do not start without the trigger condition below being true.** §4.3/ROADMAP.md §5 already treats
+`F·G` batching as the fix for bidirectional recompute cost; this exists only as a measured,
+ready-to-reference option, not a plan.
+
+**Trigger:** M7's own instrumentation shows PFN recompute genuinely dominating iteration wall clock
+at a scale `F·G` batching can't absorb (i.e. batching wider stops helping). Not before.
+
+**Prior evidence (already collected, don't re-derive):** `docs/logs/2026-09-08-causal-vs-bidirectional-pfn-comparison.md`
+— at smoke scale (`d_model=64, n_layers=4`), causal loses to bidirectional at every tested
+dimension even with 2x the training budget, and the learning-curve extrapolation projects no
+crossing (asymptote ~0.047 NLL worse). Small enough to keep on the table, real enough not to adopt
+by default.
+
+**Build (if triggered)**
+- Retrain the causal variant at whatever architecture scale (`L`, `d_model`) the rest of this
+  roadmap has landed on by then — the smoke-scale comparison's exact gap size doesn't transfer, only
+  its direction is informative until re-measured.
+- Re-run the same fair-comparison protocol the prior evidence used: permutation-averaged evaluation
+  (order affects a causal model's output; a single ordering isn't a fair readout — see the log for
+  why), matched training budget or explicit budget-fairness accounting, both an aggregate and a
+  per-dimension read.
+- Build the actual incremental-KV-cache inference wrapper (not built in the smoke-scale work either)
+  — a trained causal checkpoint existing is a precondition for this being testable at all, not the
+  same thing as this being worth building.
+
+**Acceptance**
+- Re-measured gap (causal vs. bidirectional, at the real architecture scale) is reported before any
+  decision to switch — not assumed to match the smoke-scale number.
+- The incremental cache is verified to produce identical results to full recomputation at every
+  step of a trajectory (not just fast) — a caching bug that silently changes outputs is worse than
+  no caching.
+- Wall-clock throughput win is measured end-to-end (full rollout collection, not just the PFN
+  forward in isolation) and compared directly against the `F·G`-batching baseline it would replace.
+
+---
+
 ## Dependency graph
 
 ```

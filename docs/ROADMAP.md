@@ -1,483 +1,362 @@
-# Learned Acquisition Policy — Discrete Candidate-Set RL — ROADMAP
+# Roadmap — learned acquisition policy on a frozen PFN
 
-> **Status:** design frozen, implementation not started.
-> **Audience:** implementing agent (Claude Code) + human reviewer.
-> **Read `docs/PROBLEM_SETTING.md` first** — the PFN architecture, its
-> attention pattern, and why it matters are described there once, not
-> repeated here. **Read §1 before writing any code** — these are load-bearing
-> decisions from a design discussion, not defaults; reversing them silently
-> breaks correctness or trains something that looks fine and isn't.
->
-> **Branch history:** this branch (`m4-q-head`) previously carried a
-> different design — a `Q(a|D,m)` regression trained via branch-and-replay
-> expert iteration, with an exact-DP verification oracle (`oracle/discrete_dp.py`)
-> and a privileged-search milestone (`search/`). That work (and its own
-> `docs/ROADMAP.md`) is intact on `roadmap-vla-privileged-search` if anything
-> here needs to be cross-checked or recovered — it isn't wasted, it's parked.
-> This file starts over: a discrete-candidate-set policy trained with
-> group-relative Monte Carlo RL, warm-started by distilling `LogEI`.
+## 0. What this is
 
----
+We have a Prior-Data Fitted Network (PFN) trained as a surrogate on a BNN prior. It samples
+depth, width and weights to generate a function, then learns to produce a valid posterior
+predictive distribution (PPD) over `y` at query locations given a train context, decoded as a
+binned bar distribution and trained by NLL against `BNN(x) = y`.
 
-## 0. What this project is
+Architecturally: train tokens self-attend bidirectionally; query tokens cross-attend to train
+tokens only (never to each other), using the same MHA weights. Repeated over `L` layers, then a
+linear decoder to bin logits.
 
-Learn an acquisition policy for Bayesian optimization over a BNN prior
-(`docs/PROBLEM_SETTING.md` §PS.1), the same core bet as before — a frozen
-PFN as posterior encoder, its own prior as an infinite training
-environment — but a different mechanism for turning that into a trained
-policy:
+The consequence we build on: the train context is a *sufficient state* for the optimization
+problem, and that state is spread across the layers of the PFN but is fully accessible by
+cross-attention. The query-token independence property means we can score an arbitrary number of
+locations in a single forward pass at cost linear in the number of queries.
 
-**Core loop.** At each decision, sample a candidate set of `K` points from a
-fixed, non-learned proposal (`§3 M1`). Score all `K` with a small
-cross-attention head reading the frozen PFN's own representation of the
-current context. Softmax over the `K` scores gives a categorical policy —
-sample (train) or argmax (deploy). Reward per step is the existing
-tail-quantile `g`-transform (`reward/tail_quantile_reward.py`, unchanged);
-return is the existing budget-normalized `Ḡ_t = (Σ g_s)/m ∈ [0,1]`
-(unchanged). Train with group-relative Monte Carlo policy gradient (GRPO-shaped),
-warm-started by behavior-cloning onto `LogEI`.
-
-**What's reused, unchanged, from the prior design on this branch:** the BNN
-prior (`priors/bnn.py`), the PFN and bar distribution
-(`models/pfn.py`/`models/bar_distribution.py`, including `ei`/`pi`/`quantile`/`ucb`),
-the frozen-surrogate wrapper (`models/surrogates/pfn_surrogate.py`), the
-`g`-reward and `Ḡ_t` return definitions (`reward/tail_quantile_reward.py`),
-the rollout/AUC metrics (`metrics/rollout.py`, `metrics/inc_auc.py`), and the
-GP/PFN classical baselines (`models/baselines/`). None of this is
-mechanism-specific — it's reused because it's genuinely mechanism-agnostic,
-not out of inertia.
-
-**What's different:** the policy is discrete-over-a-candidate-set instead of
-a value function trained by exact-DP-verified regression; training is
-group-relative Monte Carlo RL instead of branch-and-replay expert
-iteration; there is no exact-DP verification oracle in this design (the
-verification story here is warm-start-vs-LogEI rank correlation and
-beat-your-own-surrogate evaluation instead — `§3 M2`/`M4`).
-
-**Formal setting — unchanged.** Still a Bayes-Adaptive MDP with `D_t` as the
-(Markov, unordered-set) state (`docs/PROBLEM_SETTING.md` §PS.1); still
-minimize throughout.
+**Goal.** Stop using a hand-written acquisition function on top of the PPD. Learn an acquisition
+policy directly, by playing episodes on the BNN prior, minimizing the AUC of the log-incumbent
+curve.
 
 ---
 
-## 1. Invariants — do not change without reading the rationale
+## 1. Objective and reward
 
-### 1.1 The policy scores a sampled candidate set — it does not output a continuous action
+### 1.1 Why not raw regret
 
-The acquisition surface is multimodal by construction (multiple promising
-regions at once, especially early). A unimodal continuous policy
-(Gaussian or flow, over `[0,1]^d`) averages between modes and lands in the
-valley between them — with a noisy critic on top, that's a second thing
-that can diverge while the first is still finding its footing. This is a
-known, named failure mode for this exact problem class, not a hypothetical.
+`argmin AUC = argmax Σ_{t=1..B} f_t*`, so the policy objective needs no `y*`. But the training
+label does need normalization or the loss is dominated by prior draws with large outputscale. And
+estimating `y*` on a 15-layer tanh MLP in `d=18` by multi-start gradient ascent systematically
+undershoots, injecting per-function label bias that looks exactly like reward noise and is worst
+on the hardest functions. That is the wrong failure mode: labels least accurate precisely where
+the policy needs to be smartest.
 
-Instead: draw `K` candidates from a fixed proposal (`§3 M1`), score all `K`
-with the cross-attention head, softmax → categorical policy. This gives
-exact log-probs, exact entropy, exact KL, no reparameterization variance,
-genuine multimodality, and PPO/GRPO clipping works unmodified. **The PFN
-already has the right shape for this** (`docs/PROBLEM_SETTING.md` §PS.1):
-query tokens cross-attending to train tokens and not to each other *is* a
-parallel acquisition-function evaluator over an arbitrary candidate set —
-this project already built the architecture for a discrete policy; using
-it for a continuous one would be fighting its own shape. **MetaBO and NAP**
-(`docs/REFERENCES.md`) are the direct precedent for this parameterization
-actually training — cited there, not re-derived here.
+### 1.2 The reward we use
 
-Keep the *same* proposal distribution at train and deploy, so the induced
-distribution over the cube is consistent between them (mirrors the old
-design's own train/deploy-mismatch concern, same underlying reason).
-`K` is a real compute knob (`§1.7`) — default `K≈32–64`; spend effort on
-proposal *quality*, not on growing `K` further.
+Score the incumbent by its tail quantile under the input distribution:
 
-### 1.2 Reward and return: unchanged from the prior design, reused deliberately
+1. Draw `N = 1e6` points uniformly in `[0,1]^d`, evaluate the sampled BNN in one batched forward
+   pass. Once per function, amortized over the episode.
+2. `û_t` = empirical CDF at `f_t*`.
+3. `g_t = clip(-log10(1 - û_t), 0, 4) / 4  ∈ [0,1]`
+4. `G_t = Σ_{s=t..B} g_s`; objective = maximize `E[G_1]`.
 
-`reward/tail_quantile_reward.py`'s `g`-transform (log-scale tail-quantile,
-percentile against a per-instance dense reference) and `Ḡ_t = (Σ_{s} g_s)/m`
-(budget-normalized return, `m` = remaining budget) are reused as-is — this
-was already validated (scale-invariance, no-NaN property tests, clip-bind
-rate measured) on the prior design and none of that validation is
-mechanism-specific. `Ḡ_t ∈ [0,1]` is also, not incidentally, already in
-exactly the *return-to-go* form `§3 M0`'s diagnostic needs.
+Four properties this is defended on:
 
-### 1.3 No TD bootstrap in v1 — Monte Carlo with a group leave-one-out baseline instead
+- **No `y*` needed.** Removes the systematic label bias entirely.
+- **Invariant to monotone transforms of `f`.** Prior draws with wildly different output scales
+  become commensurable for free.
+- **Log-scaled**, so the deep tail counts: 99th → 99.9th is worth as much as 90th → 99th.
+- **Bounded.** `G_t ∈ [0, B-t+1]`, no heavy tail. Log-regret is unbounded below and its variance
+  explodes exactly when the policy is doing well — the worst possible variance profile.
 
-The old design's `h`-annealing bootstrap machinery (`V̄` targets, deadly
-triad avoidance via slow `h`-annealing) is **not used in v1.** This
-environment has a property that makes Monte Carlo strictly better here:
-it's cheap, resettable, and the function draw is fully controlled — so pay
-for variance reduction with more samples, not with bootstrap bias risk.
+### 1.3 Horizon normalization
 
-**Mechanism — sample `G` episodes (siblings) per function draw**, sharing
-the same per-function reference sample (`build_ecdf`, amortized once across
-all `G`). Per-timestep leave-one-out baseline:
+`V` predicts the horizon-normalized return `Ḡ_t = G_t / (B-t+1) ∈ [0,1]`, `m = B-t+1`.
+
+The raw sum spans two orders of magnitude across `(t, B)` pairs, so a head trained on it spends
+most of its capacity learning a trivial multiplicative scaling and its gradients are
+heteroscedastic by a factor of `B`. Normalizing puts every target in `[0,1]` regardless of budget;
+recover the sum by multiplying.
+
+### 1.4 Known limitation: reward saturation
+
+The clip at `-log10(1-û) = 4` binds at the top 100 of 1e6 samples. A competent policy in `d=18`
+will reach that. When it does, all remaining `g_t = 1`, the group advantage is identically zero,
+and that function contributes no gradient — the homogeneous-group failure mode, arriving exactly
+on the functions where we most want signal.
+
+**Accepted for now.** GPD (peaks-over-threshold) tail extrapolation is the fix and is deferred.
+The mitigation in the meantime is *instrumentation*: log the fraction of groups with zero
+advantage variance every iteration. That number tells us when this stops being acceptable.
+
+---
+
+## 2. Why not TD
+
+Targets are pure Monte Carlo: `Ḡ_t = (1/m) Σ_{s=t..B} g_s` from the realized rollout. `V̄` is
+trained by regression onto that, and appears **only in the advantage, never in its own target**.
+
+Rationale: episodes are ~1e2 steps and the simulator is free and resettable — the two conditions
+under which MC beats TD. No bootstrap chain, no target network, no deadly triad. A badly
+calibrated `V̄` costs variance, never bias. Revisit only if `B` grows into the thousands.
+
+The dominant variance source is per-function difficulty, and we kill it with a group baseline
+rather than a critic:
 
 ```
-A_t^(i) = Ḡ_t^(i) − (1/(G−1)) Σ_{j≠i} Ḡ_t^(j)
+A_t^(i) = Ḡ_t^(i) - (1 / (G-1)) Σ_{j≠i} Ḡ_t^(j)
 ```
 
-This cancels two variance sources at once, not one:
-- **Per-function difficulty** — the dominant source, since prior draws vary
-  enormously in how findable their optima are. This is the usual reason for
-  a group baseline.
-- **Reward-estimation noise in the tail.** At `N=10⁶` reference samples, the
-  CDF estimate near the `10⁻⁴` tail has ~100 supporting samples, so
-  `1−û` carries ~10% relative error there. That error is *fixed per function
-  draw* (same reference sample for every sibling), so it's identical across
-  all `G` siblings and **cancels exactly** in the leave-one-out difference.
-  This is a *specific* argument for group baselines in this exact reward
-  design, not just the generic variance-reduction one.
+`G` sibling episodes per function draw, sharing the ECDF table. Leave-one-out keeps it unbiased.
 
-**Add a learned `V̄(s_t, m)` baseline, subtracted in addition** — trained by
-regression onto Monte Carlo returns, never used as a bootstrap target. It
-captures state-dependence the sibling mean can't (siblings at step `t` are
-already in different states by then). Because it's baseline-only, a bad
-`V̄` costs variance, never bias — no deadly triad, no target network, no
-critic-divergence failure mode to guard against.
+**Second, less obvious benefit:** with `N = 1e6`, the CDF estimate near the 1e-4 tail has ~100
+supporting samples, so `1 - û` carries ~10% relative error. That error is *fixed per function
+draw*, so it appears identically in all `G` siblings and subtracts out exactly. Reward-estimation
+noise becomes a common-mode term. This is a real argument for group baselines here beyond the
+usual one.
 
-**Upgrade path if variance is still too high once this is running:**
-VinePPO-style — branch `G` rollouts from the *same* state at a randomly
-chosen subset of timesteps, not only from `t=0`. Cheap here specifically
-because the environment is a function evaluation, not an LLM rollout — a
-real option, not adopted by default in v1.
+Share the initial design across siblings, vary it across functions: siblings then diverge only
+through policy stochasticity, which tightens the baseline.
 
-**Two things not to do, named explicitly because they're tempting:**
-- **Max-based bootstrapping** (any DQN/SAC-with-max variant over the
-  candidate set). Overestimation bias scales with the number of actions
-  maxed over — here that's `K` freshly resampled candidates *every step*,
-  which is worse than a fixed discrete action set. If off-policy learning
-  is ever added, use expected-SARSA under the current policy, not a max.
-- **Analytic gradients through the BNN.** The prior draw is differentiable,
-  which makes `∂f/∂x` tempting to use directly. Don't: that's precisely the
-  local-ascent signal BO exists to avoid, the incumbent update along the
-  way is non-smooth, and long-horizon pathwise gradients through a rugged,
-  many-layer tanh landscape are a known instability mode, independent of
-  this project's own history with gradient-based search (the *old* design's
-  `search/exploit.py`/`search/explore.py`, both dropped from this branch,
-  used privileged gradient descent for a genuinely different purpose —
-  label generation under a frozen environment, not policy learning — don't
-  conflate the two).
-
-### 1.4 Freeze the PFN — train only the cross-attention scoring head
-
-Same freezing argument as the prior design
-(`docs/PROBLEM_SETTING.md`-adjacent: a policy that could reshape the PFN
-could reshape the landscape used to evaluate it), reinforced by an
-external data point: NAP (`docs/REFERENCES.md`) trained a transformer neural
-process end-to-end with RL and found it hard enough that a supervised
-auxiliary loss was needed just to keep part of the network a valid
-probabilistic model. This project already has that valid model,
-pretrained; don't risk it. Unfreeze later, if at all, only with a small LR
-and an NLL anchor loss to keep the PPD from drifting off-calibration.
-
-### 1.5 The reward must not silently saturate — reinstate the GPD tail now, not later
-
-**Reverses the prior design's explicit v1 decision** (`unclipped_gpd_reward`/`fit_gpd_tail`
-were implemented but deliberately left unused, deferred to a later
-milestone gated on measuring the clip-bind rate first). That measurement
-already happened, on the other branch: **clip-bind rate 0.333** on EI
-trajectories — a third of steps already hit the hard `-log10(1-û)=4` cap.
-That's the exact DAPO failure mode this design is newly exposed to, and it
-isn't hypothetical:
-
-Once every sibling in a group has saturated (`g_t=1` for the rest of the
-episode), every sibling's `Ḡ_t` is identical → the leave-one-out advantage
-is *identically zero* → that function contributes no gradient at all,
-precisely on the functions the policy is already good at, where the
-remaining signal (good vs. excellent) is exactly what's left to learn. At
-`d≤18` with a many-layer tanh MLP (exploitable structure, plausibly low
-effective dimension), a competent policy hitting `B~100` evaluations should
-reach the cap *often*, not rarely — this isn't a tail-case worry.
-
-**Fix: activate the already-implemented GPD tail path (peaks-over-threshold
-on the top 1%) in v1**, not deferred. If that alone doesn't fully resolve
-it, add the fallback too: **instrument the fraction of zero-advantage
-groups per batch and drop them** (DAPO's own dynamic-sampling fix) — cheap,
-and gives a direct, per-batch health metric either way (`§6`).
-
-### 1.6 Compute/parallelism axes — see `docs/PROBLEM_SETTING.md` §PS.4 for the shape
-
-Three genuinely different costs, not one: within-episode recompute (small
-in absolute terms, `K` usually dominates it), across-function batching (the
-real parallelism axis — batch `F` functions, not time), and across-gradient-step
-recompute (no KV cache needed at all — the state *is* `D_t`, small
-enough to store in a replay buffer and recompute the PFN in batch,
-embarrassingly parallel, a throughput problem not a latency one). Read
-`§PS.4` before optimizing anything here; the naive instinct ("bidirectional
-attention means no caching, that's expensive") is right about the caching
-and wrong about the expense.
+`V̄` is optional for v1.
 
 ---
 
-## 2. Known traps
+## 3. Architecture
 
-### 2.1 The DAPO dead-group problem (see `§1.5` for the fix already mandated)
+### 3.1 Frozen PFN
 
-Worth stating as its own trap because it's easy to reintroduce accidentally
-later (e.g. by tightening the reward clip, or training long enough that
-even the GPD-tailed reward starts saturating at a *different* threshold):
-**any reward with a hard ceiling will eventually produce zero-advantage
-groups once the policy gets good enough at a subset of functions**, and a
-leave-one-out/group-relative baseline makes that failure *silent* — no
-error, no NaN, just a batch that quietly stops teaching the policy anything
-about the functions it's already solved. Instrument `§6`'s zero-advantage-group
-fraction continuously, not just at v1 launch.
+The PFN is frozen. All forwards under `no_grad`, bf16. This is most of the memory budget back,
+and it protects PPD calibration from gradient signal originating in a saturating reward.
 
-### 2.2 Max-based overestimation and analytic BNN gradients
+Per env step:
 
-Both already forbidden in `§1.3`; listed again here because they're the
-kind of thing that looks like a reasonable local fix under pressure (a
-value-based method feels safer than policy gradient when training is
-unstable; a differentiable environment feels wasteful not to use directly).
-Neither is safe here for the stated reasons — re-read `§1.3` before reaching
-for either.
+- **Train tokens:** the `t` observed pairs, encoded exactly as during PFN pretraining. The
+  y-normalization is refit to `D_t` at every step — this matters (see 3.3).
+- **Query tokens:** the whole candidate pool `P` at once, `x_encoder(x*) + [MASK]` in the y slot.
+  Cost is linear in `P` because query tokens don't attend to each other. `P = 512` is not
+  meaningfully more expensive than `P = 32`.
 
-### 2.3 Unimodal continuous policies collapsing between modes
+Retained from the forward: per-layer train-token hidden states `H^ℓ ∈ R^{t×d}` for **all** layers,
+and the bar-distribution logits for every pool point.
 
-The concrete failure mode `§1.1`'s decision avoids: a Gaussian/flow policy
-trained against a genuinely multimodal target objective doesn't pick a
-mode, it averages them, landing in a low-value valley between two good
-regions — and looks like an optimization *instability* (loss spikes,
-divergence) rather than what it actually is, a parameterization mismatch.
-If this project ever revisits a continuous-action policy (e.g. for a
-learned proposer, `§7`), re-derive this risk fresh rather than assuming a
-different training recipe fixes it.
+### 3.2 Full-layer read
 
----
+Read all `L` layers. Do not depth-match expert layers to PFN layers. Concatenate all layers'
+train-token hiddens into one KV sequence of length `L·t`, add a learned per-layer embedding, and
+let a shallow (2–4 layer) expert attend into the whole thing.
 
-## 3. Milestones
+With `t ≤ 100` and `L = 12` that is ~1200 keys — negligible. This gives the full read with a
+shallow expert, and layer pruning later becomes an attention-mass measurement rather than an
+architecture change.
 
-Each milestone has an explicit exit criterion.
+Learn fresh `W_K`, `W_V` from the frozen hiddens rather than reusing the PFN's own projections —
+those were shaped for the PPD objective, and the extra projection over `t` tokens costs nothing.
 
-- [ ] M0 — RIBBO-style diagnostic: how much headroom above LogEI exists?
-- [ ] M1 — Candidate-set + cross-attention scoring head (architecture only)
-- [ ] M2 — Warm start: distill `LogEI` onto the categorical head
-- [ ] M3 — Group-relative Monte Carlo RL training loop
-- [ ] M4 — Evaluation: beat your own surrogate, not just GP-EI/random
+### 3.3 Candidate feature descriptor
 
-### M0 — Cheap diagnostic before committing to RL at all ⛔
+**Target representation: location + raw (compressed) distribution at that location.** Derived
+scalars (UCB, PI, LogEI) are a bootstrapping convenience, not the destination — the raw
+distribution plus the location is what lets the model extract anything we might want, including
+criteria we haven't thought of.
 
-**Do this before building any of M1-M3's machinery.** RIBBO
-(`docs/REFERENCES.md`) gets a competitive learned BO algorithm with **no
-RL**: fit a sequence model to trajectories from a portfolio of behavior
-algorithms, each augmented with a return-to-go conditioning token, then
-sample conditioned on a high target return at deployment. This project's
-own `Ḡ_t ∈ [0,1]` (`§1.2`) is already exactly the return-to-go form this
-needs — no new reward machinery.
+Two preprocessing choices make the raw representation strictly better than derived scalars rather
+than just more general:
 
-Generate trajectories from a portfolio (`LogEI`, `UCB` at several `β`,
-Thompson sampling from the PFN's own PPD, random, and — once it exists —
-the current policy), train a sequence model conditioned on realized
-`Ḡ_t`, sample at `Ḡ=1` (or the highest achieved value) at evaluation time.
-Optionally iterate — keep the top-quantile trajectories per function,
-retrain, repeat (expert iteration; genuinely few failure modes, since
-there's no bootstrap and no policy-gradient variance to manage at all).
+**Incumbent-relative bin alignment.** The PFN's y-transform is refit to `D_t` every step, and as
+the policy exploits, the observed set shifts up and narrows — so the same physical `y` maps to
+different bin indices at different `t`, and bin resolution in physical units changes over the
+episode. Resample the bin grid so `y*_t` sits at a fixed index. Every acquisition criterion is a
+functional of `p_k` *relative to the incumbent*, so this removes the dominant nuisance variation
+and makes a 1D conv over the bin axis meaningful.
 
-**Exit criterion:** measure how much headroom above `LogEI` this
-return-conditioned model finds, on held-out function draws. **This number
-decides whether the rest of this roadmap (M1-M4, real RL) is worth
-building.** If the headroom is small, the honest move is to stop and
-reconsider, not to proceed to a much more expensive training method chasing
-a gap that may not exist. If it's large, M1-M4 have a concrete target to
-aim past.
+**Feed the log survival function, not the pdf.** `S_k(y) = P(y' > y)`. Then `PI = S_k(y*)` is a
+single index lookup and `EI = ∫_{y*}^∞ S_k` is a fixed linear functional; UCB is a quantile
+lookup. All three land in the span of a linear head on `S`. "The sensible acquisitions are
+reachable in one step" becomes a property of the representation rather than hardcoded features.
 
-### M1 — Candidate-set proposal + cross-attention scoring head
+**Compression:** 1D conv over the aligned bin axis down to ~32–64 dims. Add an auxiliary probe
+loss — a linear map from the compressed vector to `(μ, σ, LogEI, PI, quantiles)`, trained jointly
+and then discarded. This keeps the guarantee that nothing important was squeezed out, without
+hardcoding.
 
-**No training yet — get the architecture and plumbing correct first.**
+Candidate token init: `x_embed(x*_k) ⊕ proj(compressed_S_k) ⊕ proj(q^L_k)`.
 
-`src/anytimeacquisition/search/proposer.py` (new — `search/` was removed
-from this branch along with the prior design's privileged-search machinery;
-this is a different, much simpler thing: a fixed, non-learned candidate
-generator, not a gradient-based oracle search):
-- Sobol screen
-- local perturbations around the incumbent and a few runners-up
-- a handful of Thompson draws sampled from the frozen PFN's own PPD at the
-  current context (cheap: the PFN already produces this distribution)
-- same proposal at train and deploy (`§1.1`)
+### 3.4 Pointwise scorer — no candidate self-attention
 
-`src/anytimeacquisition/models/acquisition/scoring_head.py` (new — the
-cross-attention head; naming distinct from the prior design's
-`q_head.py`/`Q(a|D,m)` regression target, since this outputs a *score* fed
-to a softmax over `K`, not a calibrated value estimate):
-- input: the PFN's PPD at each candidate (bar-distribution logits — the
-  sufficient statistic, `docs/PROBLEM_SETTING.md` §PS.2) plus a
-  cross-attention readout of the frozen context (details TBD against
-  `docs/PROBLEM_SETTING.md` §PS.3's open question — how much of the PFN's
-  internal state to read is not yet settled, see `§7`)
-- budget conditioning **on the policy itself, not just a value function** —
-  the optimal acquisition is genuinely non-stationary (explore early,
-  exploit late), and without `m` as a policy input there's no way to
-  represent that distinction at all. Token or FiLM/adaLN, either is fine;
-  this is a smaller decision than *whether* to condition on it.
-- output: one scalar score per candidate; softmax over the `K` candidates
-  is the categorical policy (`§1.1`).
+Candidates do **not** attend to each other. The scorer is `s_θ(x; D_t)`, a scalar field on the
+domain.
 
-**Exit criterion:** shapes/gradients check out end to end (forward + backward
-through a dummy loss), `m`-conditioning changes the policy's output
-distribution when `m` is varied at fixed context (the same sanity check the
-prior design used for its own budget conditioning — cheap, and catches a
-broken conditioning path before any real training starts).
+This is the load-bearing decision for the whole future direction. A pointwise scorer can be handed
+to an inner optimizer, differentiated in `x`, and maximized — which is the route out of
+heuristically proposed candidates (§5). A set-attending scorer is a function of the pool
+realization and nothing else. Self-attention would buy joint/batch selection and non-max
+suppression, neither of which we need for single-point acquisition.
 
-### M2 — Warm start: distill `LogEI`
+The one real thing it would have bought — adapting softmax peakiness to how good the available set
+is — we get from a **state-conditioned temperature** read off the register/budget tokens. Cheaper,
+and it doesn't break differentiability in `x`.
 
-`src/anytimeacquisition/trainer/warm_start.py`:
-- Behavior-clone the categorical head onto `softmax(LogEI)` over the same
-  candidate set (`LogEI` from `models/bar_distribution.py`'s `.ei()`,
-  reused unchanged) — no environment interaction, no rollouts, exact and
-  cheap.
-- Free byproducts: a policy that's already competitive on day one, a
-  natural KL anchor for the RL phase (`§3 M3`), and a direct "did RL do
-  anything" measurement once M3 runs (compare post-RL vs. this checkpoint).
+### 3.5 Global conditioning
 
-**Exit criterion:** high rank correlation / low KL between the warm-started
-head's ranking and `LogEI`'s own ranking, on held-out contexts — a cheap,
-exact architecture sanity check (if the head can't fit a deterministic
-closed-form target, something in M1's plumbing is broken, not the RL). The
-prior design's `oracle.score_candidate_q`-style rank-correlation tooling was
-removed with `M3`/`search/` on this branch — rebuild a minimal version of
-just this check here if useful, don't assume it still exists.
+Per env, not per candidate: remaining budget `m = B-t+1` and `t/B` under a Fourier embedding
+(never raw scalars), `y*_t`, observed-y spread, gap between best and second-best, and the
+y-normalization parameters.
 
-### M3 — Group-relative Monte Carlo RL training loop
+The budget token is not optional. The optimal acquisition is non-stationary — explore early,
+exploit late — and without `m` in the *policy* input (not just the value input) there is no way to
+represent that.
 
-Implements `§1.3`/`§1.5`/`§1.6` directly:
-- `F` functions batched in parallel (hundreds to low thousands, per
-  `docs/PROBLEM_SETTING.md` §PS.4 — this is the real throughput axis)
-- `G` siblings per function, sharing one reference sample (`build_ecdf`)
-  per function
-- leave-one-out advantage + learned `V̄(s_t,m)` baseline (`§1.3`)
-- reward includes the reinstated GPD tail (`§1.5`)
-- PPO-style clipped objective (works unmodified against the exact
-  categorical log-probs, `§1.1`), 2-4 epochs per batch, entropy bonus
-  annealed over training
-- KL anchor to the M2 warm-start checkpoint (or a decaying schedule off it)
+**Privileged-information rule:** the policy sees only what is computable from `D_t`. Never feed it
+`û_t`. The ECDF is simulator information that will not exist at deployment; a policy conditioned
+on its own true percentile will fail on real problems. `V̄` is discarded at test time, so it gets
+everything — `û_t`, realized function difficulty, whatever helps. Asymmetric actor-critic, free
+variance reduction.
 
-**Exit criterion:** trains stably (no collapse in entropy or reward);
-zero-advantage-group fraction (`§2.1`) tracked and not silently growing
-unaddressed; measurable improvement over the M2 warm-start baseline on
-held-out functions, not just a decreasing loss.
+### 3.6 Value expert
 
-### M4 — Evaluation: the bar is your own surrogate, not GP-EI
+Separate module: register tokens only, cross-attending into the same frozen PFN KV, no candidate
+tokens at all.
 
-**Primary baseline: `PFN + LogEI` over the identical candidate set.** If the
-trained policy doesn't beat this, the RL isn't contributing anything beyond
-what the frozen surrogate already offers for free — this is the number that
-actually answers "did this work," ahead of any comparison to a different
-surrogate family. `GP+EI` and random search (both already implemented,
-`models/baselines/gp_acquisition.py`, `metrics/rollout.py`) stay in the
-table too, for external grounding against the prior design's own M2
-findings — but they're context, not the pass/fail bar.
+- `V̄` must be a function of state, not of the candidate draw. If it reads candidate tokens the
+  baseline inherits noise from the random proposal — injecting variance into the thing whose job
+  is removing it.
+- It lets us feed privileged features to `V̄` with zero risk of leakage into `π`.
 
-**Exit criterion:** full comparison table (policy, `PFN+LogEI`, `GP+EI`,
-random) across a spread of `d`/`B`, per-instance normalized (reuse the
-per-instance percentile normalization already validated on the prior
-design — raw-scale AUC is not directly comparable across heterogeneous
-function draws, same reasoning as before, don't relitigate it).
+**Categorical head, not regression.** `Ḡ_t ∈ [0,1]` is bounded: discretize into ~51 bins, two-hot
+(HL-Gauss style) target, cross-entropy loss. Categorical value heads are consistently more stable
+than MSE, and we already have the binned-decoder pattern in the codebase from the PFN itself.
 
 ---
 
-## 4. Repository layout
+## 4. Training
+
+### 4.1 Phase 1 — supervised myopic pretraining
+
+Do **not** distill LogEI. We have the BNN, so regress the candidate score onto the **realized
+one-step reward increment**: for state `D_t` and candidate `x_k`, evaluate `f(x_k)`, compute
+`g_{t+1}` from the ECDF, regress `ŝ(x_k; D_t)` onto it.
+
+The minimizer of that regression is `E[g_{t+1} | D_t, x_k]` — the exact myopic-optimal criterion
+for *our* objective. Not EI, which is a heuristic; not the PFN's EI, which is a heuristic computed
+from an approximate posterior. Strictly better teacher, and free.
+
+Three consequences:
+
+- **The supervised head is literally `Q_1`.** Horizon-1 Q-learning by regression. RL then only has
+  to buy the non-myopic correction, which is a far smaller thing to discover than an acquisition
+  function from scratch.
+- **No rollouts needed.** Sample `(f, D_t, x_k)` triples independently and regress. Fully
+  parallel, no sequential dependency, enormously cheaper per sample than the RL loop.
+- This phase is also what teaches the model to *interpret* the location and the raw distribution
+  at that location, which is the point of §3.3.
+
+**State distribution caveat.** If `D_t` comes only from random subsets, we are training off the
+state distribution the policy will actually induce. Refresh periodically with states from the
+current policy (DAgger-style), or the myopic head will be miscalibrated exactly in the exploited,
+narrow-spread regime where it matters.
+
+### 4.2 Phase 2 — RL, residual handoff
+
+Parameterize the RL-time logit as:
 
 ```
-src/anytimeacquisition/
-  priors/
-    bnn.py                       # already exists, unchanged, reused
-  models/
-    pfn.py                       # already exists, unchanged, reused
-    bar_distribution.py          # already exists, unchanged, reused (ei/pi/quantile/ucb)
-    surrogates/
-      pfn_surrogate.py           # already exists, reused -- may need a return_hidden path (M1, see §7)
-    acquisition/
-      scoring_head.py            # M1 -- new
-    baselines/
-      gp_acquisition.py, pfn_acquisition.py   # already exist, reused (M4)
-  reward/
-    tail_quantile_reward.py      # already exists, reused -- activate the GPD path (§1.5)
-  search/
-    proposer.py                  # M1 -- new; note: NOT the prior design's search/ (removed)
-  trainer/
-    warm_start.py                # M2 -- new (different content from the prior design's own warm_start.py)
-    grpo_trainer.py               # M3 -- new
-  pipelines/
-    train_policy.py               # M3 -- new Hydra entry point
-  metrics/
-    inc_auc.py, rollout.py        # already exist, reused
-notebooks/
-  m0_return_conditioned_diagnostic.ipynb   # M0
-  m2_warm_start_vs_logei.ipynb              # M2
-  m4_policy_vs_baselines.ipynb              # M4
-docs/
-  ROADMAP.md            # this file
-  PROBLEM_SETTING.md    # shared background
-  REFERENCES.md         # bibliography
+s_k = ŝ_myopic(k) + Δ_θ(k)          Δ zero-initialized
 ```
 
----
+An architectural anchor rather than a KL penalty. We start exactly at myopic-optimal and RL can
+only add. Better behaved than annealing `β_KL`, and one fewer coefficient to tune.
 
-## 5. Config surface
+Loss:
 
-| Key | Default | Notes |
-|---|---|---|
-| `proposer.K` | `32–64` | candidates per decision (`§1.1`) |
-| `proposer.n_thompson` | small | Thompson draws from the PFN's own PPD |
-| `train.G` | TBD, tune | siblings per function (`§1.3`) |
-| `train.F` | `512–2048` | parallel functions per batch (`§1.6`/§PS.4) |
-| `reward.gpd_top_percentile` | `99.0` | already implemented (`fit_gpd_tail`), now active in v1 (`§1.5`) |
-| `train.entropy_coef` | anneal | collapse guard |
-| `train.kl_anchor_weight` | TBD | anchor to M2 warm start |
-| `pfn.freeze` | `true` | `§1.4` — not a v1 knob to ablate casually |
+```
+L = -E[ min(r_t A_t, clip(r_t, 1-ε_lo, 1+ε_hi) A_t) ]
+    - β_H H(π_t)
+    + c_V CE(V̄, twohot(Ḡ_t))
+```
 
----
+`r_t` is per-step and there is exactly one action per step, so the token-level vs sequence-level
+importance-sampling debate does not arise — this is a plain MDP. Use clip-higher
+(`ε_hi ≈ 0.28`, `ε_lo ≈ 0.2`); acquisition policies collapse to greedy fast and asymmetric
+clipping is the cheapest counterweight. Autotune `β_H` against an entropy target rather than
+fixing it.
 
-## 6. Diagnostics — run continuously, not at the end
+### 4.3 Rollout loop
 
-| Diagnostic | Catches | Milestone |
-|---|---|---|
-| Zero-advantage-group fraction | Silent DAPO dead-group failure (`§1.5`/`§2.1`) | M3 |
-| Rank correlation / KL vs. `LogEI` | Whether RL moved past warm start at all | M2/M3 |
-| Reward clip-bind rate (post-GPD) | Whether the GPD tail is actually resolving the cap, not just moving it | M3 |
-| Categorical policy entropy over training | Collapse (over-exploitation) or failure to commit (stuck near-uniform) | M3 |
-| `m`-shuffle test | Broken budget-conditioning path (`§3 M1`) | M1 |
-| Tokens/sec, wall-clock per step | Whether `F`/`K`/`G` are actually well-batched (`§1.6`) | M3 |
+Per iteration:
 
----
+1. Draw `F` functions from the prior. Evaluate `N = 1e6` uniform points each and build the
+   quantile lookup. Do not store 1e6 floats × `F` — store a 4096-point quantile grid plus the top
+   ~1000 values exactly (tail resolution is the only place precision is needed) and interpolate.
+2. Initialize with `n_init ≈ 2d` Sobol points. Shared across siblings, varied across functions.
+3. Replicate to `F×G` parallel envs, step in lockstep. Every env at step `t` has the same context
+   length, so this batches with zero padding: one PFN forward over `F·G × (t + P)` tokens per
+   step. The sequential axis is only `B` long; the batch axis is whatever fills the GPU.
+4. Rewards, `Ḡ_t`, group-LOO advantage, PPO update on the trainable experts only.
 
-## 7. Open questions
+**PPO epochs: do not cache KV.** Store the dataset (~5 KB) and the selected `K` candidate
+coordinates (~2 KB) per state, and recompute the frozen PFN each epoch in a big batch. It is
+no-grad bf16 over a frozen model — recomputation is cheaper than the memory traffic of a KV store,
+and storing candidates explicitly is what guarantees the ratio denominators stay valid across
+epochs.
 
-1. **How much of the PFN's internal state should `scoring_head.py` read?**
-   Only the final PPD (safe, matches "sufficient statistic" argument,
-   §PS.2), or also cross-attend into intermediate representations (richer,
-   closer to π0.5's own pattern, §PS.3, but mechanically close to the prior
-   design's own retired `models/action_head.py` — see that branch's
-   history before assuming this is a fresh question). Not settled; resolve
-   before or during M1, ablate rather than assume.
-2. **Does the VinePPO-style mid-trajectory branching upgrade (`§1.3`) turn
-   out to be necessary?** Only answerable once M3 is running and variance
-   can actually be measured, not before.
-3. **Should the PFN ever be unfrozen (`§1.4`)?** If M4's results plateau
-   below what the architecture seems capable of, revisit with a small LR
-   and NLL anchor — not a v1 question.
-4. **Causal-masked PFN variant, for genuine `O(B)` trajectory KV-caching**
-   (mentioned as a live option, not a default, in `docs/PROBLEM_SETTING.md`-adjacent
-   discussion): would need a *separate* PFN pretraining run (causal masking
-   over randomly permuted train-token order), loses exact exchangeability
-   (a real modeling cost, not just an engineering one), but the
-   counter-argument — the acquisition-ordered context at decision time is
-   already off the prior's own i.i.d.-input measure, so exact
-   exchangeability may be less load-bearing at deployment than it sounds —
-   is worth a controlled comparison, not an a priori rejection. Explicitly
-   **not in scope until `§1.6`'s existing batching plan is shown
-   insufficient** — don't build this preemptively.
+The "bidirectional attention means we can't KV-cache" concern is real but narrowly scoped: it
+costs `O(B²)` token-forwards per episode instead of `O(B)`, on an absolutely tiny number. It is
+fixed by batching across environments, not by caching.
 
 ---
 
-## 8. Explicitly out of scope for v1
+## 5. Deferred, in rough priority order
 
-- Continuous/flow-based policy over `[0,1]^d` (`§1.1`)
-- TD bootstrapping / `h`-annealing value targets, reused from the prior
-  design (`§1.3`) — Monte Carlo + group baseline only, in v1
-- Max-based (DQN/SAC-style) value learning (`§1.3`/`§2.2`)
-- Analytic gradients through the BNN prior for policy learning (`§1.3`/`§2.2`)
-- Unfreezing/fine-tuning the PFN (`§1.4`, revisit per `§7.3`)
-- Causal-masked PFN retraining for trajectory-level KV-caching (`§7.4`)
-- A learned proposer (the proposal distribution in `§3 M1` stays fixed and
-  non-learned in v1; a shared-trunk dual-head learned proposer is a
-  plausible future extension, not this one)
+**Learned candidate proposal.** The scorer is pointwise and the PFN is differentiable in the query
+location, so `∂s_θ/∂x` exists through the whole stack. The honest version of BO's inner loop:
+Sobol restarts → gradient ascent on `s_θ` → converged points are the candidate set → softmax over
+them. Sobol demotes from "action set" to "restart set", which is what it is in every classical BO
+implementation.
+
+> Correctness detail: if the candidate set depends on `θ`, then `π_old` and `π_θ` are defined over
+> *different* sets and the PPO ratio is meaningless. Run the inner ascent under `θ_old` — the
+> rollout snapshot — and score the resulting fixed set under `θ`. The candidate set becomes part of
+> the frozen rollout artifact stored alongside the dataset.
+
+The fully amortized version (conditional flow or diffusion proposal trained toward the Boltzmann
+distribution of `s_θ`) gives exact continuous log-probs and handles multimodality properly, but
+it's a second trainable stochastic thing that can diverge. Gradient ascent gets most of the
+benefit with none of that.
+
+**GPD tail on the reward.** Peaks-over-threshold fit to the top 1%, extrapolate the CDF past 1e-4.
+Removes the saturation dead zone. Triggered by the zero-variance-group monitor.
+
+**Candidate feature descriptor revision.** Expected. The §3.3 design is a starting point.
+
+**Candidate selection rule revision.** Expected, and largely subsumed by the learned proposal.
+
+**Layer-read pruning.** Only after measuring attention mass per layer.
+
+**Unfreezing the PFN.** Last, if at all. Requires an NLL anchor and a non-saturating reward first.
+
+**Causal-masked PFN for trajectory-level KV-caching (optional; not a default direction).**
+§4.3 already settles v1's cost story — batching across `F·G` envs, not caching, fixes the
+bidirectional recompute cost, and that's the current plan. This is here because it was actually
+tested empirically (branch `roadmap-vla-privileged-search`, `docs/logs/2026-09-08-causal-vs-bidirectional-pfn-comparison.md`),
+not proposed speculatively: a causal-masked PFN (lower-triangular train-train self-attention,
+retrained from scratch) trades exact exchangeability for a real prefix-caching property (a train
+token's hidden state at every layer is provably unchanged by later tokens — verified directly, not
+assumed), which would let a rollout extend a KV cache incrementally instead of recomputing `O(t)`
+per step.
+
+The measured cost of that tradeoff, at matched architecture (`d_model=64, n_layers=4`) and prior
+(`x_dim=6`, variable-dim), causal given **2x** the bidirectional checkpoint's training budget
+(59,999 vs. 29,999 steps) specifically to give it a fair chance: causal loses on held-out NLL at
+every tested dimension 1–6, though the gap is small (order 0.02–0.19 NLL depending on dimension,
+overlapping standard errors at some dimensions). The learning-curve extrapolation (binned
+`NLL(step) = a + b/step` fit, R²=0.89) projects **no crossing** — causal's own fitted asymptote
+sits ~0.047 NLL worse than bidirectional's plateau, not "closes with more steps." Read that
+extrapolation as suggestive, not proven (one run per architecture, projected ~2.5x past the
+observed range) — but it agrees with the direct comparison, not contradicts it.
+
+**Why this stays optional rather than becoming a plan:** the gap is small enough that this is a
+real, defensible tradeoff to keep on the table — a modest, fairly consistent quality cost against a
+throughput benefit this design doesn't currently need (§4.3's batching already fixes the cost this
+would address). Revisit only if M7's own instrumentation (`Ḡ_1` gap tracked against wall clock, not
+just against the LogEI baseline) shows PFN recompute genuinely dominating iteration time at a scale
+`F·G` batching can't absorb — not before, and not by default. If revisited, retrain at whatever
+architecture scale (`L`, `d_model`) the rest of this roadmap actually lands on, not at the smoke
+scale this comparison used — the gap's exact size at `L=12` is unmeasured.
+
+---
+
+## 6. Instrumentation (from day one, not bolted on)
+
+| Metric | Why |
+|---|---|
+| Fraction of groups with zero advantage variance | The saturation monitor. Tells us when the deferred GPD stops being deferrable. |
+| Policy entropy | Acquisition policies collapse to greedy; this is the early warning. |
+| `argmax π` vs `argmax LogEI` agreement rate | "Is RL doing anything" |
+| `Ḡ` gap: policy vs PFN+LogEI on the same candidate set | The only baseline that matters. Not GP-EI, not random. |
+| Chosen candidate's proposal branch vs `t/B` | Renders the explore/exploit schedule directly. If flat, budget conditioning isn't working. |
+| `V̄` calibration (reliability diagram on `Ḡ`) | Cheap, catches a broken value head immediately. |
+| Probe-loss residual on the compressed descriptor | Catches over-compression of the bar distribution. |
