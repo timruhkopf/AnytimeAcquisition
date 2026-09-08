@@ -11,6 +11,24 @@ see `archive/src/exit/PFN_ActionHead_ExpertIteration_Design.md`):
     test point's prediction conditionally independent given the context,
     required for the PPD to be a valid predictive distribution point-by-point.
 
+**`causal=True` (2026-09-08, off by default) trades exchangeability for
+prefix-cacheability.** With it, train-train self-attention is masked
+lower-triangular instead of bidirectional -- train token `i` only ever
+attends to train tokens `1..i`. This is a genuinely different model, not a
+toggle on an already-trained bidirectional checkpoint: it needs its own
+pretraining run (`pipelines/train_pfn_causal.py`), and it gives up exact
+permutation invariance (order now carries information a bidirectional
+model's context representation deliberately can't). What it buys: one
+forward pass over a full context now yields, at every layer, the *exact*
+representation each prefix length would have produced on its own -- i.e.
+`hidden_states[l][:, :i]` after processing `[0:i]` train tokens is
+identical whether or not tokens `i+1:n` are appended afterward. That's what
+makes genuine incremental KV-caching along a BO trajectory correct: a new
+observation extends the cache rather than invalidating it, unlike the
+bidirectional model where any change to `D_t` forces a full recompute (see
+docs/PROBLEM_SETTING.md §PS.4 and docs/ROADMAP.md §7.4 for the cost
+tradeoff this is answering).
+
 Checked against PFNs4BO's own `TransformerModel.generate_D_q_matrix` (their
 reference implementation, via a single mask fed into one homogeneous
 transformer stack rather than separate self-/cross-attention modules): same
@@ -204,6 +222,7 @@ class PFNBlock(nn.Module):
         x_train: torch.Tensor,
         x_test: torch.Tensor,
         train_key_padding_mask: torch.Tensor | None = None,
+        train_attn_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """x_train: [B,Ntr,D]; x_test: [B,Nte,D] -- kept as two separate
         tensors (never concatenated) so train-train and test-train attention
@@ -211,10 +230,16 @@ class PFNBlock(nn.Module):
         train_key_padding_mask: [B,Ntr] bool, True = real train token, passed
         straight through to both attention calls' key/value side (train is
         the kv side of both: itself for train-train, the only side for
-        test-train)."""
+        test-train). train_attn_mask: [Ntr,Ntr] bool, True = allowed -- only
+        applied to the train-train self-attention call (see `PFN`'s own
+        `causal` flag); test-train cross-attention is never masked this way,
+        since test tokens are candidates scored against whatever train
+        tokens are currently present, not a prefix of anything themselves."""
         train_normed = self.ln1(x_train)
         test_normed = self.ln1(x_test)
-        x_train = x_train + self.attn(train_normed, key_padding_mask=train_key_padding_mask)
+        x_train = x_train + self.attn(
+            train_normed, attn_mask=train_attn_mask, key_padding_mask=train_key_padding_mask
+        )
         x_test = x_test + self.attn(
             test_normed, kv_input=train_normed, key_padding_mask=train_key_padding_mask
         )
@@ -226,10 +251,16 @@ class PFNBlock(nn.Module):
 class PFN(nn.Module):
     def __init__(
         self, max_x_dim: int, d_model: int = 128, n_heads: int = 4, n_layers: int = 4,
-        d_ff: int = 256, n_bins: int = 64, dropout: float = 0.0,
+        d_ff: int = 256, n_bins: int = 64, dropout: float = 0.0, causal: bool = False,
     ):
         super().__init__()
         self.max_x_dim = max_x_dim
+        # causal=True: train-train self-attention is masked lower-triangular
+        # (token i sees train tokens 1..i only) instead of full bidirectional
+        # -- see pipelines/train_pfn_causal.py's module docstring for why
+        # this is a genuinely different model (own pretraining, own
+        # checkpoint), not a toggle on an already-trained bidirectional one.
+        self.causal = causal
         # Train tokens see (x, y); test tokens see (x,) with a learned
         # "no-y-yet" placeholder embedding instead of a real y. Built
         # max_x_dim-wide, not necessarily every episode's real x_dim -- see
@@ -274,9 +305,14 @@ class PFN(nn.Module):
         train_tok = self.train_embed(torch.cat([x_train, y_train.unsqueeze(-1)], dim=-1))
         test_tok = self.test_x_embed(x_test) + self.test_placeholder.view(1, 1, -1)
 
+        train_attn_mask = None
+        if self.causal:
+            Ntr = x_train.shape[1]
+            train_attn_mask = torch.tril(torch.ones(Ntr, Ntr, dtype=torch.bool, device=x_train.device))
+
         hidden_states = []
         for block in self.blocks:
-            train_tok, test_tok = block(train_tok, test_tok, train_key_padding_mask)
+            train_tok, test_tok = block(train_tok, test_tok, train_key_padding_mask, train_attn_mask)
             if return_hidden:
                 hidden_states.append(torch.cat([train_tok, test_tok], dim=1))
 

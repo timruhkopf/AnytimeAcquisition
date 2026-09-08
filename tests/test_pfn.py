@@ -154,3 +154,58 @@ def test_bar_dist_is_owned_submodule_not_a_trainable_parameter():
     assert "bar_dist.bucket_widths" in model.state_dict()
     # buffers, not learnable weights -- must not show up in the optimizer's view
     assert not any(name.startswith("bar_dist.") for name, _ in model.named_parameters())
+
+
+def test_causal_defaults_off_and_matches_bidirectional_when_disabled():
+    torch.manual_seed(0)
+    model = _make_model(causal=False)
+    assert model.causal is False
+    x_train, y_train = torch.rand(2, 5, 2), torch.rand(2, 5)
+    x_test = torch.rand(2, 3, 2)
+    # unaffected by train-set order when causal is off -- the existing
+    # bidirectional permutation-invariance property, unchanged
+    perm = torch.randperm(5)
+    logits = model(x_train, y_train, x_test)
+    logits_perm = model(x_train[:, perm], y_train[:, perm], x_test)
+    assert torch.allclose(logits, logits_perm, atol=1e-5)
+
+
+def test_causal_train_prefix_is_invariant_to_later_tokens():
+    """The one property causal=True exists for: a train token's own
+    representation -- and any test/candidate token's cross-attention result
+    computed against a prefix -- must not depend on train tokens appended
+    after it. This is what makes incremental KV-caching along a trajectory
+    correct rather than an approximation."""
+    torch.manual_seed(0)
+    model = _make_model(causal=True, n_layers=3)
+    model.eval()
+    B, Ntr_full, d = 2, 6, 2
+    x_full = torch.rand(B, Ntr_full, d)
+    y_full = torch.rand(B, Ntr_full)
+    x_test = torch.rand(B, 4, d)
+
+    prefix_len = 3
+    with torch.no_grad():
+        _, hidden_full = model(x_full, y_full, x_test, return_hidden=True)
+        _, hidden_prefix = model(x_full[:, :prefix_len], y_full[:, :prefix_len], x_test, return_hidden=True)
+
+    for layer_full, layer_prefix in zip(hidden_full, hidden_prefix):
+        train_repr_full = layer_full[:, :prefix_len]  # same layer's train-token slice, full-context forward
+        train_repr_prefix = layer_prefix[:, :prefix_len]  # ...vs. a forward that only ever saw the prefix
+        assert torch.allclose(train_repr_full, train_repr_prefix, atol=1e-5)
+
+
+def test_causal_train_order_is_not_invariant_unlike_bidirectional():
+    """Sanity check that causal=True actually changes behavior -- order now
+    matters (the tradeoff §PS.1/pfn.py's own docstring names), unlike the
+    bidirectional default."""
+    torch.manual_seed(0)
+    model = _make_model(causal=True, n_layers=2)
+    model.eval()
+    x_train, y_train = torch.rand(2, 5, 2), torch.rand(2, 5)
+    x_test = torch.rand(2, 3, 2)
+    perm = torch.tensor([4, 3, 2, 1, 0])  # reversed, not a no-op permutation
+    with torch.no_grad():
+        logits = model(x_train, y_train, x_test)
+        logits_perm = model(x_train[:, perm], y_train[:, perm], x_test)
+    assert not torch.allclose(logits, logits_perm, atol=1e-4)

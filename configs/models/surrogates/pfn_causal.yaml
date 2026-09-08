@@ -1,0 +1,12 @@
+# Same as configs/models/surrogates/pfn.yaml, causal=true -- a genuinely
+# different model (own pretraining run, own checkpoint lineage), not an
+# inference-time toggle on an already-trained bidirectional PFN. See
+# models/pfn.py's own docstring and pipelines/train_pfn_causal.py.
+_target_: anytimeacquisition.models.pfn.PFN
+max_x_dim: ${priors.x_dim}
+d_model: 64
+n_heads: 4
+n_layers: 4
+d_ff: 128
+n_bins: 64
+causal: true

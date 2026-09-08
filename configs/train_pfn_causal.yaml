@@ -1,0 +1,35 @@
+# Top-level Hydra config for pipelines/train_pfn_causal.py -- separate from
+# configs/train_pfn.yaml on purpose: the causal PFN (docs/ROADMAP.md §7.4,
+# models/pfn.py's own `causal=True` docstring) is a genuinely different
+# model, trained from scratch, not a fine-tune of a bidirectional
+# checkpoint, and its own MLflow experiment keeps the two lineages from
+# mixing in tracking. Otherwise identical composition to train_pfn.yaml --
+# same PFNTrainer, same BNNPrior, same provenance/MLflow wiring.
+#
+# Run a named, reproducible config via `experiment=<name>`, e.g.:
+#   uv run python -m anytimeacquisition.pipelines.train_pfn_causal experiment=pfn_causal_smoke_xdim2
+defaults:
+  - priors: bnn
+  - models/surrogates: pfn_causal
+  - trainer: pfn_trainer
+  - callbacks: mlflow
+  - _self_
+  - optional experiment: null
+
+seed: 0
+device: cpu
+allow_dirty: false
+
+# See configs/train_pfn.yaml -- same opt-in per-dimension validation.
+validate_dims: null
+
+callbacks:
+  mlflow:
+    experiment_name: anytimeacquisition-pfn-causal-pretrain
+
+hydra:
+  run:
+    dir: ${aa_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${aa_root:}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
