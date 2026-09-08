@@ -54,6 +54,7 @@ def build_dim_validation_callback(
     n_val_points: int = 200,
     seed: int = 0,
     every_n_steps: int | None = None,
+    device: str = "cpu",
 ) -> Callback:
     """One `Callback` covering every dimension in `dims`, reporting
     `nll/val_dimN` and `mse/val_dimN` for each -- metric-type first, so
@@ -81,7 +82,13 @@ def build_dim_validation_callback(
     raises, since silently overriding a caller's explicit value would be
     more confusing than refusing. `every_n_steps=None` (default) uses the
     trainer's own `log_every` cadence (see `callbacks/handler.py`).
-    """
+
+    `device`: must match the trainer's own model device -- these dedicated
+    validation priors are built independently of the training prior (which
+    the caller already put on the right device), so this doesn't default
+    to anything inferred; a caller training on `cuda` and forgetting this
+    gets a `RuntimeError` from the very first probe (`cuda`/`cpu` tensor
+    mismatch), not silently-slow CPU validation."""
     reserved = {"x_dim", "variable_dim_min", "batch_size", "ecdf_sorted"}
     prior_kwargs = dict(prior_kwargs or {})
     clashing = reserved & prior_kwargs.keys()
@@ -99,7 +106,7 @@ def build_dim_validation_callback(
     val_priors = {
         d: BNNPrior(
             batch_size=n_val_context, x_dim=d, variable_dim_min=None, seed=seed,
-            ecdf_sorted=ecdf_sorted, **prior_kwargs,
+            ecdf_sorted=ecdf_sorted, device=device, **prior_kwargs,
         )
         for d in dims
     }

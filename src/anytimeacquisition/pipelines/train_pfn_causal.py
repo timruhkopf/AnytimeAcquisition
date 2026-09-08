@@ -141,7 +141,7 @@ def main(cfg: DictConfig) -> dict:
                 prior_kwargs.pop(key, None)
             callbacks = [build_dim_validation_callback(
                 dims=list(validate_dims), max_x_dim=cfg.priors.x_dim,
-                ecdf_sorted=prior.ecdf_sorted, prior_kwargs=prior_kwargs, seed=cfg.seed,
+                ecdf_sorted=prior.ecdf_sorted, prior_kwargs=prior_kwargs, seed=cfg.seed, device=cfg.device,
             )]
 
         trainer = instantiate(

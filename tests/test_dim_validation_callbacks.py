@@ -96,6 +96,24 @@ def test_dedicated_priors_keep_fixed_architecture_across_probes():
     assert torch.equal(val_priors[2].depth, depth_before)
 
 
+def test_device_is_threaded_into_dedicated_priors():
+    """Regression test: build_dim_validation_callback used to build its
+    dedicated val_priors with BNNPrior's own device="cpu" default
+    regardless of what device the trainer's model was actually on --
+    silent on CPU-only runs, but a RuntimeError (cuda/cpu tensor mismatch)
+    the first time this ran against a cuda-trained model (caught training
+    pfn_causal_variable_xdim_real on ulysses). CPU-only check here (no
+    CUDA in this environment) -- confirms the kwarg is actually threaded
+    through to BNNPrior, not that cuda itself works."""
+    callback = build_dim_validation_callback(
+        dims=[1, 2], max_x_dim=4, ecdf_sorted=_shared_ecdf(),
+        n_val_context=4, n_val_points=10, device="cpu",
+    )
+    val_priors = _captured(callback.fn, "val_priors")
+    for val_prior in val_priors.values():
+        assert val_prior.device == "cpu"
+
+
 def test_custom_every_n_steps_overrides_default_cadence():
     callback = build_dim_validation_callback(
         dims=[1], max_x_dim=4, ecdf_sorted=_shared_ecdf(),
