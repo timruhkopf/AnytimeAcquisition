@@ -1,0 +1,27 @@
+# @package _global_
+# A considerably-longer-trained bidirectional PFN, same architecture and
+# prior family as pfn_variable_xdim_smoke.yaml's checkpoint (29,999 steps)
+# -- built specifically to test whether that checkpoint's own-training-point
+# recall imprecision (docs/logs/2026-09-09-pfn-own-training-point-recall.md)
+# is an undertraining artifact: querying it exactly at its own train x's
+# doesn't recover the observed y even approximately (errors up to ~0.29 on
+# a [0,1]-normalized scale, worst at points that break a locally-smooth
+# trend -- including the incumbent itself in one probed instance). Keeping
+# every other setting identical to the smoke config isolates step count as
+# the only manipulated variable.
+# Run: uv run python -m anytimeacquisition.pipelines.train_pfn experiment=pfn_variable_xdim_real
+priors:
+  x_dim: 6
+  batch_size: 32
+  variable_dim_min: 1
+models:
+  surrogates:
+    d_model: 64
+    n_layers: 4
+    n_bins: 64
+trainer:
+  n_steps: 300000  # ~10x the smoke checkpoint's actual 29,999 steps
+  log_every: 500
+  checkpoint_path: ${aa_root:}/models/pfn_variable_xdim_real.pt
+validate_dims: [1, 2, 3, 4, 5, 6]
+device: cuda
